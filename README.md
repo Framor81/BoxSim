@@ -16,22 +16,23 @@ python main.py
 
 Connects to UnrealCV (port 9000), prints pawn pose at 5 Hz. Ctrl+C to stop.
 
-**“Pose (unavailable)” but connection works?** UnrealCV is connected but the pawn name may not match. You need a **pawn in the level** (your default player pawn or one you placed).
+**“Pose (unavailable)” but connection works?** You must use the **object name**, not the display name. In Unreal the Outliner may show a display name (e.g. “BP_MyPlayer_Pawn”); UnrealCV expects the **object name** (e.g. `BP_MyPlayer_Pawn_C_1`). The default pawn name is `BP_MyPlayer_Pawn_C_1`; override with `UNREALCV_PAWN` if yours differs.
 
 1. **List object names** UnrealCV can see:
    ```bash
    python main.py --list-objects
    ```
-2. **Use that name** (e.g. if you see `BP_MyPlayer_Pawn_0` or `PlayerPawn_0`):
+   Use one of the printed names (object name) as `UNREALCV_PAWN`.
+2. **Set the pawn** (use the exact object name from the list):
    ```bash
-   UNREALCV_PAWN=BP_MyPlayer_Pawn_0 python main.py
+   UNREALCV_PAWN=BP_MyPlayer_Pawn_C_1 python main.py
    ```
-3. **Debug** to see the raw response when pose fails:
+3. **Debug** to see every command sent and raw response:
    ```bash
    python main.py --debug
    ```
 
-In Unreal: your **Game Mode** should use a Blueprint that has a **Default Pawn Class** set to your pawn Blueprint (e.g. `BP_MyPlayer_Pawn`). The script uses the **class** name with `_C` (e.g. `BP_MyPlayer_Pawn_C`) or the **instance** name from `--list-objects`.
+In Unreal: set your **Game Mode** → **Default Pawn Class** to your pawn Blueprint. The script uses the **object name** (e.g. `BP_MyPlayer_Pawn_C_1`), not the Blueprint display name.
 
 ## Map builder
 
