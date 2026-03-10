@@ -14,7 +14,24 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Connects to UnrealCV (port 9000), prints BP_MyPlayer_Pawn_C pose at 5 Hz. Ctrl+C to stop.
+Connects to UnrealCV (port 9000), prints pawn pose at 5 Hz. Ctrl+C to stop.
+
+**“Pose (unavailable)” but connection works?** UnrealCV is connected but the pawn name may not match. You need a **pawn in the level** (your default player pawn or one you placed).
+
+1. **List object names** UnrealCV can see:
+   ```bash
+   python main.py --list-objects
+   ```
+2. **Use that name** (e.g. if you see `BP_MyPlayer_Pawn_0` or `PlayerPawn_0`):
+   ```bash
+   UNREALCV_PAWN=BP_MyPlayer_Pawn_0 python main.py
+   ```
+3. **Debug** to see the raw response when pose fails:
+   ```bash
+   python main.py --debug
+   ```
+
+In Unreal: your **Game Mode** should use a Blueprint that has a **Default Pawn Class** set to your pawn Blueprint (e.g. `BP_MyPlayer_Pawn`). The script uses the **class** name with `_C` (e.g. `BP_MyPlayer_Pawn_C`) or the **instance** name from `--list-objects`.
 
 ## Map builder
 
