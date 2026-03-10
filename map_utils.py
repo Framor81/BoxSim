@@ -1,6 +1,4 @@
-"""
-Map data: world↔pixel coordinates and load/save (map.png + map.json).
-"""
+# World↔pixel coords; load/save map.png + map.json.
 
 from __future__ import annotations
 
@@ -11,8 +9,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-
-# --- Coordinates (Unreal world X,Y <-> map pixels) ---
 
 def world_to_pixel(
     world_x: float, world_y: float,
@@ -41,8 +37,6 @@ def scale_from_ortho_width(ortho_width: float, image_width: int) -> float:
         return 1.0
     return image_width / ortho_width
 
-
-# --- Load / save map image + metadata ---
 
 def load_map(path_prefix: str | Path) -> tuple[np.ndarray, dict[str, Any]]:
     path_prefix = Path(path_prefix)

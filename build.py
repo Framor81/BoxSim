@@ -1,12 +1,5 @@
-"""
-Run map builder: screenshot from Unreal or manual canvas.
+# Map builder: screenshot | manual.
 
-  python build.py screenshot   # capture top-down, then annotate
-  python build.py manual      # blank canvas, draw boxes yourself
-  UNREALCV_HOST=192.168.1.50 python build.py screenshot
-"""
-
-import os
 import sys
 
 from agent import UnrealAgent
@@ -18,9 +11,7 @@ def main() -> int:
         print("Usage: python build.py screenshot | manual")
         return 1
     mode = sys.argv[1]
-    host = os.environ.get("UNREALCV_HOST", "localhost")
-    port = int(os.environ.get("UNREALCV_PORT", "9000"))
-    agent = UnrealAgent(host=host, port=port)
+    agent = UnrealAgent()
     if mode == "screenshot":
         if not agent.connect():
             print("Failed to connect to UnrealCV (port 9000)", file=sys.stderr)

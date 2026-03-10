@@ -1,7 +1,4 @@
-"""
-Two map builder flows: from Unreal screenshot vs manual (no image).
-Same interface (.run(agent, ...)); different setup.
-"""
+# ScreenshotMapBuilder: from Unreal. ManualMapBuilder: blank canvas.
 
 from __future__ import annotations
 
@@ -21,8 +18,6 @@ DEFAULT_ORTHO_WIDTH = 4000
 
 
 class ScreenshotMapBuilder:
-    """Capture top-down from Unreal, then open viewer to annotate."""
-
     def __init__(
         self,
         *,
@@ -93,8 +88,6 @@ class ScreenshotMapBuilder:
 
 
 class ManualMapBuilder:
-    """Open viewer with blank grid; no Unreal screenshot."""
-
     def __init__(
         self,
         *,

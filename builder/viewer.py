@@ -1,7 +1,4 @@
-"""
-Map viewer: background (image or grid), obstacles, robot triangle.
-Tools: polygon, brush, box. S = save, Esc = close.
-"""
+# Map viewer: bg, obstacles, robot. 1=Poly 2=Brush 3=Box S=Save Esc=Close.
 
 from __future__ import annotations
 

@@ -1,11 +1,4 @@
-"""
-Pose polling: connect to UnrealCV and print pawn pose at 5 Hz until Ctrl+C.
-
-  python main.py                  # normal
-  python main.py --list-objects   # print object names (find your pawn)
-  python main.py --debug          # show raw UnrealCV response when pose fails
-  UNREALCV_PAWN=MyPawn_0 python main.py   # use this pawn name
-"""
+# Pose polling. --list-objects / --debug. UNREALCV_PAWN for pawn name.
 
 import os
 import sys
@@ -17,9 +10,7 @@ POSE_RATE_HZ = 5.0
 
 def main() -> int:
     if "--list-objects" in sys.argv:
-        host = os.environ.get("UNREALCV_HOST", "localhost")
-        port = int(os.environ.get("UNREALCV_PORT", "9000"))
-        agent = UnrealAgent(host=host, port=port)
+        agent = UnrealAgent()
         if not agent.connect():
             print("Failed to connect.", file=sys.stderr)
             return 1
@@ -28,17 +19,14 @@ def main() -> int:
         for n in names:
             print(f"  {n}")
         print("")
-        print("Use the OBJECT NAME (e.g. BP_MyPlayer_Pawn_C_1) for UNREALCV_PAWN, not the display name.")
-        print("Example: UNREALCV_PAWN=BP_MyPlayer_Pawn_C_1 python main.py")
+        print("Use object name for UNREALCV_PAWN.")
         agent.disconnect()
         return 0
 
     debug = "--debug" in sys.argv
-    host = os.environ.get("UNREALCV_HOST", "localhost")
-    port = int(os.environ.get("UNREALCV_PORT", "9000"))
     pawn = os.environ.get("UNREALCV_PAWN", "BP_MyPlayer_Pawn_C_1")
-    agent = UnrealAgent(host=host, port=port)
-    print(f"Connecting to UnrealCV at {host}:{port} ...")
+    agent = UnrealAgent()
+    print("Connecting to UnrealCV (localhost:9000) ...")
     if not agent.connect():
         print("Failed to connect. Is Unreal running with UnrealCV on port 9000?", file=sys.stderr)
         return 1

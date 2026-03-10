@@ -1,7 +1,4 @@
-"""
-UnrealCV connection and pawn pose.
-Pawn is identified by name: set UNREALCV_PAWN to match your Blueprint or instance name.
-"""
+# UnrealCV client; pawn from UNREALCV_PAWN (object name).
 
 from __future__ import annotations
 
@@ -20,15 +17,12 @@ def _pawn_name() -> str:
 
 
 class PawnPose(NamedTuple):
-    """Pose: X, Y (Unreal), Yaw (degrees)."""
     x: float
     y: float
     yaw: float
 
 
 class UnrealAgent:
-    """UnrealCV client; pose and optional camera/screenshot commands."""
-
     def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
         self._host = host
         self._port = port
@@ -61,8 +55,39 @@ class UnrealAgent:
         except Exception:
             return None
 
+    def key(self, key: str, duration: float = 0.1) -> None:
+        if not self.is_connected():
+            return
+        try:
+            self._client.request(f"vset /action/keyboard {key} {duration}")
+        except Exception:
+            pass
+
+    def move_forward(self, seconds: float = 1.0, *, step: float = 0.1) -> None:
+        n = max(1, int(seconds / step))
+        for _ in range(n):
+            self.key("W", step)
+            time.sleep(step)
+
+    def move_backward(self, seconds: float = 1.0, *, step: float = 0.1) -> None:
+        n = max(1, int(seconds / step))
+        for _ in range(n):
+            self.key("S", step)
+            time.sleep(step)
+
+    def turn_left(self, seconds: float = 1.0, *, step: float = 0.1) -> None:
+        n = max(1, int(seconds / step))
+        for _ in range(n):
+            self.key("A", step)
+            time.sleep(step)
+
+    def turn_right(self, seconds: float = 1.0, *, step: float = 0.1) -> None:
+        n = max(1, int(seconds / step))
+        for _ in range(n):
+            self.key("D", step)
+            time.sleep(step)
+
     def list_objects(self) -> list[str]:
-        """Return object names visible to UnrealCV. Use the OBJECT NAME (e.g. BP_MyPlayer_Pawn_C_1), not the display name."""
         if not self.is_connected():
             return []
         try:
@@ -161,7 +186,6 @@ class UnrealAgent:
 
 
 def run_pose_loop(agent: UnrealAgent, rate_hz: float = 5.0, *, debug: bool = False, hint_on_fail: bool = True) -> None:
-    """Poll pose at rate_hz, print until Ctrl+C."""
     interval = 1.0 / rate_hz
     hint_printed = False
     while True:
@@ -172,7 +196,7 @@ def run_pose_loop(agent: UnrealAgent, rate_hz: float = 5.0, *, debug: bool = Fal
         else:
             print("pose (unavailable)")
             if hint_on_fail and not hint_printed:
-                print("  Tip: Use OBJECT NAME (e.g. BP_MyPlayer_Pawn_C_1) for UNREALCV_PAWN, not display name. --list-objects to see names, --debug for raw responses.")
+                print("  Tip: UNREALCV_PAWN=object_name. --list-objects --debug")
                 hint_printed = True
         elapsed = time.perf_counter() - t0
         if interval - elapsed > 0:
