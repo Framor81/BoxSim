@@ -1,4 +1,4 @@
-# Map builder: screenshot | manual.
+# Map builder: screenshot | manual. Use --unreal to connect for manual (robot overlay).
 
 import sys
 
@@ -8,9 +8,10 @@ from builder import ManualMapBuilder, ScreenshotMapBuilder
 
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] not in ("screenshot", "manual"):
-        print("Usage: python build.py screenshot | manual")
+        print("Usage: python build.py screenshot | manual [--unreal]")
         return 1
     mode = sys.argv[1]
+    use_unreal = "--unreal" in sys.argv
     agent = UnrealAgent()
     if mode == "screenshot":
         if not agent.connect():
@@ -18,7 +19,8 @@ def main() -> int:
             return 1
         ScreenshotMapBuilder(save_path_prefix="data/maps/map").run(agent)
     else:
-        agent.connect()
+        if use_unreal:
+            agent.connect()
         ManualMapBuilder(save_path_prefix="data/maps/manual_map").run(
             agent if agent.is_connected() else None
         )

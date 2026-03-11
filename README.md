@@ -6,6 +6,13 @@ Unreal Engine 5 + UnrealCV: pose, drive, map building.
 pip install -r requirements.txt
 ```
 
+**Features**
+- **Pose** — Poll pawn location (X, Y) and yaw at 5 Hz from Unreal.
+- **Drive** — Run a sequence of W/A/S/D key presses (declare in `drive.py` PATH); keys sent to Unreal via UnrealCV.
+- **Map from screenshot** — Capture top-down ortho from Unreal, draw obstacles (polygon/brush/box), save map.png + map.json.
+- **Map from scratch** — Same drawing tools on a blank grid; optional live pose overlay.
+- **Object list / debug** — `--list-objects` to see pawn object name; `--debug` to see raw UnrealCV commands and responses.
+
 | Command | What |
 |---------|------|
 | `python main.py` | Pose at 5 Hz. Ctrl+C stop. |
@@ -14,6 +21,7 @@ pip install -r requirements.txt
 | `python drive.py` | Run PATH in drive.py (W/A/S/D sent to Unreal) |
 | `python build.py screenshot` | Top-down from Unreal, annotate, save |
 | `python build.py manual` | Blank canvas, draw obstacles |
+| `python build.py manual --unreal` | Same + connect to Unreal (robot overlay) |
 
 Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not display name).
 
