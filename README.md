@@ -25,4 +25,4 @@ pip install -r requirements.txt
 
 Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not display name).
 
-Map controls: 1/2/3=Poly/Brush/Box. A=obstacle (red) S=drivable (white) D=cut (erase). W=goal E=path (click first point again to close). Ctrl+S=Save. Grid overlay: center 0,0, range -500 to 500.
+Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid: center 0,0, range -500 to 500; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.

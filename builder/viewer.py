@@ -32,6 +32,7 @@ CLOSE_POINT_RADIUS = 12
 COLOR_TOOL_ACTIVE = (120, 255, 120)
 GOAL_RADIUS = 10
 COORD_TICK_INTERVAL = 100
+SIDEBAR_WIDTH = 92
 
 
 def _world_to_screen(world_x: float, world_y: float, origin: tuple[float, float],
@@ -71,9 +72,9 @@ class MapViewer:
         self.world_height = world_height or self.metadata.get("world_height") or self.world_width
         self.origin = tuple(self.metadata.get("origin", [0, 0]))
         self.scale = self.metadata.get("scale", 0.2)
-        self.obstacles: list[list[tuple[float, float]]] = []
-        self.drivable: list[list[tuple[float, float]]] = []
-        self.erase_polygons: list[list[tuple[float, float]]] = []
+        self.obstacles = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("obstacles", [])]
+        self.drivable = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("drivable", [])]
+        self.erase_polygons = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("erase_polygons", [])]
         self.current_polygon: list[tuple[float, float]] = []
         self.rect_start = self.rect_end = None
         self.brush_surface = None
@@ -81,10 +82,12 @@ class MapViewer:
         self.erase_brush_surface = None
         self.tool = TOOL_POLYGON
         self.terrain = TERRAIN_OBSTACLE
-        self.goals: list[tuple[float, float]] = []
-        self.path: list[tuple[float, float]] = []
+        self.goals = [(float(p[0]), float(p[1])) for p in self.metadata.get("goals", [])]
+        self.path = [(float(p[0]), float(p[1])) for p in self.metadata.get("path", [])]
         self.current_path: list[tuple[float, float]] = []
         self.view_offset_x = self.view_offset_y = 0.0
+        self._undo_history: list[dict] = []
+        self._bg_surface: pygame.Surface | None = None
 
         if background_image is not None:
             if background_image.ndim == 2:
@@ -101,6 +104,7 @@ class MapViewer:
         pygame.display.set_caption("Map Builder")
         self.clock = pygame.time.Clock()
         self._make_brush_surfaces()
+        self._build_bg_surface()
         self.running = True
         self._pose_cache: tuple[float, float, float] | None = None
         self._pose_cache_time = 0.0
@@ -114,34 +118,37 @@ class MapViewer:
             s.fill((0, 0, 0))
             setattr(self, name, s)
 
-    def _draw_grid(self, surface: pygame.Surface) -> None:
-        surface.fill(COLOR_BG)
-        for x in range(0, self.width + 1, GRID_SIZE):
-            pygame.draw.line(surface, COLOR_GRID, (x, 0), (x, self.height))
-        for y in range(0, self.height + 1, GRID_SIZE):
-            pygame.draw.line(surface, COLOR_GRID, (0, y), (self.width, y))
-        self._draw_coord_overlay(surface)
-
-    def _draw_coord_overlay(self, surface: pygame.Surface) -> None:
+    def _build_bg_surface(self) -> None:
+        if self.background is not None:
+            self._bg_surface = None
+            return
+        self._bg_surface = pygame.Surface((self.width, self.height))
+        self._bg_surface.fill(COLOR_BG)
         vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
         lo, hi = -500, 500
         step = COORD_TICK_INTERVAL
         for wx in range(lo, hi + 1, step):
             mx = wx * self.scale
             px, _ = self._map_pixel_to_screen(mx, 0)
-            if -50 <= px < self.width + 50:
+            if -20 <= px < self.width + 20:
                 w = 2 if wx == 0 else 1
-                pygame.draw.line(surface, COLOR_AXIS, (int(px), 0), (int(px), self.height), w)
+                pygame.draw.line(self._bg_surface, COLOR_GRID if w == 1 else COLOR_AXIS, (int(px), 0), (int(px), self.height), w)
                 t = self._font.render(str(wx), True, COLOR_AXIS)
-                surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + 4))
+                self._bg_surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + 4))
         for wy in range(lo, hi + 1, step):
             my = wy * self.scale
             _, py = self._map_pixel_to_screen(0, my)
-            if -50 <= py < self.height + 50:
+            if -20 <= py < self.height + 20:
                 w = 2 if wy == 0 else 1
-                pygame.draw.line(surface, COLOR_AXIS, (0, int(py)), (self.width, int(py)), w)
+                pygame.draw.line(self._bg_surface, COLOR_GRID if w == 1 else COLOR_AXIS, (0, int(py)), (self.width, int(py)), w)
                 t = self._font.render(str(-wy), True, COLOR_AXIS)
-                surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
+                self._bg_surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
+
+    def _draw_grid(self, surface: pygame.Surface) -> None:
+        if self._bg_surface is not None:
+            surface.blit(self._bg_surface, (0, 0))
+        else:
+            surface.fill(COLOR_BG)
 
     def _screen_to_map_pixel(self, sx: float, sy: float) -> tuple[float, float]:
         mx = sx - self.view_center[0] - self.view_offset_x
@@ -152,9 +159,29 @@ class MapViewer:
         return (self.view_center[0] + mx + self.view_offset_x,
                 self.view_center[1] - my + self.view_offset_y)
 
+    def _push_undo_state(self) -> None:
+        self._undo_history.append({
+            "obstacles": [list(p) for p in self.obstacles],
+            "drivable": [list(p) for p in self.drivable],
+            "erase_polygons": [list(p) for p in self.erase_polygons],
+            "goals": list(self.goals),
+            "path": list(self.path),
+        })
+
+    def _undo(self) -> None:
+        if not self._undo_history:
+            return
+        state = self._undo_history.pop()
+        self.obstacles = [list(p) for p in state["obstacles"]]
+        self.drivable = [list(p) for p in state["drivable"]]
+        self.erase_polygons = [list(p) for p in state["erase_polygons"]]
+        self.goals = list(state["goals"])
+        self.path = list(state["path"])
+
     def _commit_polygon(self) -> None:
         if len(self.current_polygon) < 3:
             return
+        self._push_undo_state()
         poly = self.current_polygon.copy()
         if self.terrain == TERRAIN_OBSTACLE:
             self.obstacles.append(poly)
@@ -166,6 +193,7 @@ class MapViewer:
     def _commit_rect(self) -> None:
         if not self.rect_start or not self.rect_end:
             return
+        self._push_undo_state()
         x0, y0, x1, y1 = *self.rect_start, *self.rect_end
         poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         if self.terrain == TERRAIN_OBSTACLE:
@@ -181,11 +209,14 @@ class MapViewer:
             pygame.draw.circle(self.brush_surface, COLOR_OBSTACLE, pos, BRUSH_RADIUS)
         elif self.terrain == TERRAIN_DRIVABLE and self.drivable_brush_surface:
             pygame.draw.circle(self.drivable_brush_surface, COLOR_DRIVABLE, pos, BRUSH_RADIUS)
-        elif self.terrain == TERRAIN_CUT and self.erase_brush_surface:
-            pygame.draw.circle(self.erase_brush_surface, COLOR_BG, pos, BRUSH_RADIUS)
+        elif self.terrain == TERRAIN_CUT and self.erase_brush_surface and self._bg_surface is not None:
+            r = pygame.Rect(pos[0] - BRUSH_RADIUS, pos[1] - BRUSH_RADIUS, 2 * BRUSH_RADIUS, 2 * BRUSH_RADIUS)
+            r.clamp_ip(self._bg_surface.get_rect())
+            if r.width > 0 and r.height > 0:
+                sub = self._bg_surface.subsurface(r).copy()
+                self.erase_brush_surface.blit(sub, r.topleft)
 
-    def _draw_tool_bar(self) -> None:
-        now = time.time()
+    def _draw_sidebar(self) -> None:
         default = (200, 200, 200)
         items = [
             ("1", "Poly", self.tool == TOOL_POLYGON),
@@ -196,14 +227,27 @@ class MapViewer:
             ("D", "Cut", self.terrain == TERRAIN_CUT),
             ("W", "Goal", self.tool == TOOL_GOAL),
             ("E", "Path", self.tool == TOOL_PATH),
-            ("Ctrl+S", "Save", now < self._save_flash_until),
         ]
-        x = 8
+        y = 8
         for key, label, active in items:
             c = COLOR_TOOL_ACTIVE if active else default
-            t = self._font.render(f"{key}={label}", True, c)
-            self.screen.blit(t, (x, self.height - 24))
-            x += t.get_width() + 8
+            t = self._font.render(f"{key} {label}", True, c)
+            self.screen.blit(t, (6, y))
+            y += t.get_height() + 4
+        now = time.time()
+        if now < self._save_flash_until:
+            t = self._font.render("Saved", True, COLOR_TOOL_ACTIVE)
+        else:
+            t = self._font.render("Ctrl+S Save", True, default)
+        self.screen.blit(t, (6, y))
+        y += t.get_height() + 4
+        t = self._font.render("Ctrl+Z Undo", True, default)
+        self.screen.blit(t, (6, y))
+
+    def _draw_tool_bar(self) -> None:
+        self._draw_sidebar()
+        t = self._font.render("Ctrl+S Save  Ctrl+Z Undo  Esc Close", True, (180, 180, 180))
+        self.screen.blit(t, (SIDEBAR_WIDTH + 8, self.height - 20))
 
     def _preview_color(self) -> tuple[int, int, int]:
         if self.terrain == TERRAIN_OBSTACLE:
@@ -280,10 +324,13 @@ class MapViewer:
 
     def _compose_map_image(self) -> np.ndarray:
         if self.background is not None:
-            out = np.transpose(pygame.surfarray.array3d(self.background), (1, 0, 2))
+            base = pygame.surfarray.array3d(self.background)
+        elif self._bg_surface is not None:
+            base = pygame.surfarray.array3d(self._bg_surface)
         else:
-            out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            out[:] = COLOR_BG
+            base = np.zeros((self.width, self.height, 3), dtype=np.uint8)
+            base[:] = COLOR_BG
+        base = np.transpose(base, (1, 0, 2)).copy()
         temp = pygame.Surface((self.width, self.height))
         temp.fill((0, 0, 0))
         temp.set_colorkey((0, 0, 0))
@@ -299,22 +346,36 @@ class MapViewer:
                 pygame.draw.polygon(temp, COLOR_OBSTACLE, pts)
         if self.brush_surface is not None:
             temp.blit(self.brush_surface, (0, 0))
-        for poly in self.erase_polygons:
-            if len(poly) >= 3:
-                pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-                pygame.draw.polygon(temp, COLOR_BG, pts)
-        if self.erase_brush_surface is not None:
-            temp.blit(self.erase_brush_surface, (0, 0))
-        arr = np.transpose(pygame.surfarray.array3d(temp), (1, 0, 2))
-        mask = (arr[:, :, 0] > 0) | (arr[:, :, 1] > 0) | (arr[:, :, 2] > 0)
+        drawn = np.transpose(pygame.surfarray.array3d(temp), (1, 0, 2))
+        drawn_mask = (drawn[:, :, 0] > 0) | (drawn[:, :, 1] > 0) | (drawn[:, :, 2] > 0)
         for c in range(3):
-            out[:, :, c] = np.where(mask, arr[:, :, c], out[:, :, c])
-        return out
+            base[:, :, c] = np.where(drawn_mask, drawn[:, :, c], base[:, :, c])
+        if self.erase_polygons or (self.erase_brush_surface is not None):
+            mask_surf = pygame.Surface((self.width, self.height))
+            mask_surf.fill((0, 0, 0))
+            for poly in self.erase_polygons:
+                if len(poly) >= 3:
+                    pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+                    pygame.draw.polygon(mask_surf, (255, 255, 255), pts)
+            poly_mask = np.transpose(pygame.surfarray.array3d(mask_surf), (1, 0, 2))[:, :, 0] > 128
+            if self.erase_brush_surface is not None:
+                arr = np.transpose(pygame.surfarray.array3d(self.erase_brush_surface), (1, 0, 2))
+                brush_mask = (arr[:, :, 0] > 0) | (arr[:, :, 1] > 0) | (arr[:, :, 2] > 0)
+                poly_mask = poly_mask | brush_mask
+            restore = np.transpose(pygame.surfarray.array3d(
+                self._bg_surface if self._bg_surface is not None else self.background
+            ), (1, 0, 2))
+            for c in range(3):
+                base[:, :, c] = np.where(poly_mask, restore[:, :, c], base[:, :, c])
+        return base
 
     def _save(self, path_prefix: str) -> None:
         meta = dict(self.metadata)
         meta["goals"] = [[float(p[0]), float(p[1])] for p in self.goals]
         meta["path"] = [[float(p[0]), float(p[1])] for p in self.path]
+        meta["obstacles"] = [[[float(x), float(y)] for x, y in p] for p in self.obstacles]
+        meta["drivable"] = [[[float(x), float(y)] for x, y in p] for p in self.drivable]
+        meta["erase_polygons"] = [[[float(x), float(y)] for x, y in p] for p in self.erase_polygons]
         map_utils.save_map(path_prefix, self._compose_map_image(), meta)
         self._save_flash_until = time.time() + 0.6
         print(f"Saved {path_prefix}.png and {path_prefix}.json")
@@ -330,15 +391,18 @@ class MapViewer:
                     self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
                     self.view_center = (self.width // 2, self.height // 2)
                     self._make_brush_surfaces()
+                    self._build_bg_surface()
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         mx, my = self._screen_to_map_pixel(*event.pos)
                         if self.tool == TOOL_GOAL:
+                            self._push_undo_state()
                             self.goals.append((mx, my))
                         elif self.tool == TOOL_PATH:
                             if len(self.current_path) >= 2:
                                 sx0, sy0 = self._map_pixel_to_screen(self.current_path[0][0], self.current_path[0][1])
                                 if (event.pos[0] - sx0) ** 2 + (event.pos[1] - sy0) ** 2 <= CLOSE_POINT_RADIUS ** 2:
+                                    self._push_undo_state()
                                     self.path = self.current_path.copy()
                                     self.current_path.clear()
                                 else:
@@ -351,6 +415,7 @@ class MapViewer:
                                     sx, sy = self._map_pixel_to_screen(pt[0], pt[1])
                                     if (event.pos[0] - sx) ** 2 + (event.pos[1] - sy) ** 2 <= CLOSE_POINT_RADIUS ** 2:
                                         self._commit_polygon()
+                                        self.current_polygon.clear()
                                         break
                                 else:
                                     self.current_polygon.append((mx, my))
@@ -369,6 +434,7 @@ class MapViewer:
                             self.rect_start = self.rect_end = None
                         elif self.tool == TOOL_PATH and self.current_path:
                             if len(self.current_path) >= 2:
+                                self._push_undo_state()
                                 self.path = self.current_path.copy()
                             self.current_path.clear()
                 elif event.type == pygame.MOUSEBUTTONUP:
@@ -389,6 +455,8 @@ class MapViewer:
                             self.running = False
                     elif event.key == pygame.K_s and (pygame.key.get_mods() & pygame.KMOD_CTRL):
                         self._save(save_path_prefix)
+                    elif event.key == pygame.K_z and (pygame.key.get_mods() & pygame.KMOD_CTRL):
+                        self._undo()
                     elif event.key == pygame.K_1:
                         self.tool = TOOL_POLYGON
                     elif event.key == pygame.K_2:
