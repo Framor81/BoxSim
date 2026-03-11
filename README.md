@@ -25,4 +25,4 @@ pip install -r requirements.txt
 
 Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not display name).
 
-Map controls: 1=Polygon 2=Brush 3=Box S=Save Esc=Close
+Map controls: 1/2/3=Poly/Brush/Box. A=obstacle (red) S=drivable (white) D=cut (erase). W=goal E=path (click first point again to close). Ctrl+S=Save. Grid overlay: center 0,0, range -500 to 500.

@@ -91,8 +91,8 @@ class ManualMapBuilder:
     def __init__(
         self,
         *,
-        world_width: float = 4000,
-        world_height: float = 4000,
+        world_width: float = 1000,
+        world_height: float = 1000,
         viewer_width: int = 1024,
         viewer_height: int = 768,
         save_path_prefix: str = "data/maps/manual_map",
