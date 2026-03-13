@@ -1,4 +1,8 @@
 # Map viewer. 1/2/3=shape, A=obstacle S=drivable D=cut, W=goal E=path, S=Save.
+#
+# Data model: terrain is lists of TerrainPoly (exterior + optional holes). Cuts subtract from
+# terrain (Shapely difference); drawing (brush/polygon) adds. Holes can contain other polygons
+# (e.g. drivable "islands" inside a cut); the hole-fill mask excludes those so they stay visible.
 
 from __future__ import annotations
 
@@ -8,8 +12,14 @@ from typing import Callable
 
 import pygame
 import numpy as np
+from shapely.geometry import Polygon, Point
+from shapely import make_valid
 
 import map_utils
+
+# Terrain polygon: (exterior, interiors). exterior = list of (x,y), interiors = list of list of (x,y) (holes).
+TerrainPoly = tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]
+ErasePoly = TerrainPoly
 
 TOOL_POLYGON, TOOL_BRUSH, TOOL_RECT = "polygon", "brush", "rect"
 TOOL_GOAL, TOOL_PATH = "goal", "path"
@@ -20,6 +30,7 @@ COLOR_OBSTACLE = (200, 60, 60)
 COLOR_DRIVABLE = (240, 240, 240)
 COLOR_OBSTACLE_PREVIEW = (220, 100, 100)
 COLOR_DRIVABLE_PREVIEW = (200, 200, 200)
+COLOR_CUT_PREVIEW = (100, 108, 120)
 COLOR_GOAL = (80, 220, 80)
 COLOR_PATH = (255, 220, 80)
 COLOR_ROBOT = (100, 180, 100)
@@ -41,8 +52,68 @@ def _world_to_screen(world_x: float, world_y: float, origin: tuple[float, float]
     return (view_center[0] + px, view_center[1] - py)
 
 
+def _shapely_to_erase_polys(geom) -> list[ErasePoly]:
+    """Convert Shapely geometry to list of (exterior, interiors) for terrain storage.
+    Handles: Polygon (one item with exterior + interiors), MultiPolygon (one item per poly),
+    GeometryCollection (recurse). Edge cases: None/empty -> []; degenerate polygon (<3 pts) -> skip."""
+    if geom is None or geom.is_empty:
+        return []
+    out: list[ErasePoly] = []
+    if geom.geom_type == "Polygon":
+        ext = [(float(x), float(y)) for x, y in geom.exterior.coords[:-1]]
+        if len(ext) < 3:
+            return []
+        ints = [[(float(x), float(y)) for x, y in interior.coords[:-1]] for interior in geom.interiors]
+        out.append((ext, ints))
+    elif geom.geom_type == "MultiPolygon":
+        for p in geom.geoms:
+            out.extend(_shapely_to_erase_polys(p))
+    elif geom.geom_type == "GeometryCollection":
+        for g in geom.geoms:
+            out.extend(_shapely_to_erase_polys(g))
+    return out
+
+
+def _terrain_poly_to_geom(points: list[tuple[float, float]]):
+    """Build a valid Shapely Polygon from a list of (x,y) for use in difference/union.
+    Edge cases: <3 points -> None; invalid polygon -> make_valid; still empty after fix -> None."""
+    if len(points) < 3:
+        return None
+    try:
+        p = Polygon(points)
+        if p.is_empty:
+            return None
+        if not p.is_valid:
+            p = make_valid(p)
+        if p.is_empty:
+            return None
+        return p
+    except Exception:
+        return None
+
+
+def _shapely_to_simple_polys(geom) -> list[list[tuple[float, float]]]:
+    """Convert Shapely geometry to list of simple polygon coords (exterior only, no holes).
+    Used when we only need outlines. Handles Polygon/MultiPolygon/GeometryCollection; skips <3 pts."""
+    if geom is None or geom.is_empty:
+        return []
+    out: list[list[tuple[float, float]]] = []
+    if geom.geom_type == "Polygon":
+        ext = [(float(x), float(y)) for x, y in geom.exterior.coords[:-1]]
+        if len(ext) >= 3:
+            out.append(ext)
+    elif geom.geom_type == "MultiPolygon":
+        for p in geom.geoms:
+            out.extend(_shapely_to_simple_polys(p))
+    elif geom.geom_type == "GeometryCollection":
+        for g in geom.geoms:
+            out.extend(_shapely_to_simple_polys(g))
+    return out
+
+
 def _draw_robot_triangle(surface: pygame.Surface, center: tuple[float, float],
                          yaw_deg: float, size: float = 12) -> None:
+    """Draw a small triangle for robot pose (nose in yaw direction) in screen coords."""
     yaw_rad = math.radians(yaw_deg) + math.pi
     nose = (center[0] + size * math.cos(yaw_rad), center[1] - size * math.sin(yaw_rad))
     back = yaw_rad + math.pi
@@ -55,6 +126,8 @@ def _draw_robot_triangle(surface: pygame.Surface, center: tuple[float, float],
 
 
 class MapViewer:
+    """Pygame map builder: draw obstacles/drivable/cuts, goals, path; save to image + JSON."""
+
     def __init__(
         self,
         width: int, height: int,
@@ -65,6 +138,7 @@ class MapViewer:
         world_width: float | None = None,
         world_height: float | None = None,
     ) -> None:
+        """Set up window, load obstacles/drivable from metadata, apply saved erase_polygons as cuts."""
         self.width, self.height = width, height
         self.metadata = dict(metadata)
         self.pose_getter = pose_getter
@@ -72,9 +146,19 @@ class MapViewer:
         self.world_height = world_height or self.metadata.get("world_height") or self.world_width
         self.origin = tuple(self.metadata.get("origin", [0, 0]))
         self.scale = self.metadata.get("scale", 0.2)
-        self.obstacles = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("obstacles", [])]
-        self.drivable = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("drivable", [])]
-        self.erase_polygons = [[(float(x), float(y)) for x, y in p] for p in self.metadata.get("erase_polygons", [])]
+        self.obstacles = self._load_terrain_polys(self.metadata.get("obstacles", []))
+        self.drivable = self._load_terrain_polys(self.metadata.get("drivable", []))
+        loaded_erase = self._load_erase_polygons(self.metadata.get("erase_polygons", []))
+        self.erase_polygons = []
+        for (ext, ints) in loaded_erase:
+            try:
+                cut_geom = Polygon(ext, ints) if ints else Polygon(ext)
+                if not cut_geom.is_valid:
+                    cut_geom = make_valid(cut_geom)
+                if cut_geom is not None and not cut_geom.is_empty:
+                    self._subtract_cut_from_terrain(cut_geom)
+            except Exception:
+                pass
         self.current_polygon: list[tuple[float, float]] = []
         self.rect_start = self.rect_end = None
         self.brush_surface = None
@@ -103,15 +187,16 @@ class MapViewer:
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         pygame.display.set_caption("Map Builder")
         self.clock = pygame.time.Clock()
+        self._font = pygame.font.Font(None, 24)
         self._make_brush_surfaces()
         self._build_bg_surface()
         self.running = True
         self._pose_cache: tuple[float, float, float] | None = None
         self._pose_cache_time = 0.0
-        self._font = pygame.font.Font(None, 24)
         self._save_flash_until = 0.0
 
     def _make_brush_surfaces(self) -> None:
+        """Create/resize overlay surfaces for brush and erase; black fill, colorkey black for transparency."""
         for name in ("brush_surface", "drivable_brush_surface", "erase_brush_surface"):
             s = pygame.Surface((self.width, self.height))
             s.set_colorkey((0, 0, 0))
@@ -119,6 +204,7 @@ class MapViewer:
             setattr(self, name, s)
 
     def _build_bg_surface(self) -> None:
+        """Build grid background (when no image): axes and ticks in map coords; used for hole fill and base."""
         if self.background is not None:
             self._bg_surface = None
             return
@@ -145,139 +231,312 @@ class MapViewer:
                 self._bg_surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
 
     def _draw_grid(self, surface: pygame.Surface) -> None:
+        """Draw base layer: grid background or solid fill if no _bg_surface."""
         if self._bg_surface is not None:
             surface.blit(self._bg_surface, (0, 0))
         else:
             surface.fill(COLOR_BG)
 
     def _screen_to_map_pixel(self, sx: float, sy: float) -> tuple[float, float]:
+        """Screen (pixel) to map coords: origin at view_center + offset, Y flipped."""
         mx = sx - self.view_center[0] - self.view_offset_x
         my = -(sy - self.view_center[1] - self.view_offset_y)
         return (mx, my)
 
     def _map_pixel_to_screen(self, mx: float, my: float) -> tuple[float, float]:
+        """Map coords to screen (pixel). Inverse of _screen_to_map_pixel."""
         return (self.view_center[0] + mx + self.view_offset_x,
                 self.view_center[1] - my + self.view_offset_y)
 
+    def _load_terrain_polys(self, raw: list) -> list[TerrainPoly]:
+        """Load terrain from JSON: legacy list of [[x,y],...] or list of {exterior, interiors}. Skips <3 pts."""
+        out: list[TerrainPoly] = []
+        for item in raw:
+            if isinstance(item, dict):
+                ext = [tuple(p) for p in item.get("exterior", [])]
+                ints = [[tuple(p) for p in hole] for hole in item.get("interiors", [])]
+                if len(ext) >= 3:
+                    out.append((ext, ints))
+            else:
+                poly = [(float(x), float(y)) for x, y in item]
+                if len(poly) >= 3:
+                    out.append((poly, []))
+        return out
+
+    def _load_erase_polygons(self, raw: list) -> list[ErasePoly]:
+        """Load erase (cut) polygons from JSON; same format as _load_terrain_polys."""
+        return self._load_terrain_polys(raw)
+
+    def _subtract_cut_from_terrain(self, cut_geom) -> None:
+        """Cut = eraser: subtract cut_geom from every obstacle and drivable polygon (Shapely difference).
+        Cases: cut fully inside polygon -> new hole; cut crossing boundary -> split/reshape; cut outside -> no change.
+        Preserves existing holes; can create nested holes (cut inside hole). Invalid/empty geom skipped; on exception keep original poly."""
+        if cut_geom is None or cut_geom.is_empty:
+            return
+        if not cut_geom.is_valid:
+            cut_geom = make_valid(cut_geom)
+        if cut_geom.is_empty:
+            return
+
+        def subtract_from_list(poly_list: list[TerrainPoly]) -> list[TerrainPoly]:
+            new_list: list[TerrainPoly] = []
+            for (ext, ints) in poly_list:
+                if len(ext) < 3:
+                    continue
+                try:
+                    p = Polygon(ext, ints) if ints else Polygon(ext)
+                    if p.is_empty:
+                        continue
+                    if not p.is_valid:
+                        p = make_valid(p)
+                    if p.is_empty:
+                        continue
+                    diff = p.difference(cut_geom)
+                    new_list.extend(_shapely_to_erase_polys(diff))
+                except Exception:
+                    new_list.append((ext, ints))
+            return new_list
+
+        self.obstacles = subtract_from_list(self.obstacles)
+        self.drivable = subtract_from_list(self.drivable)
+
     def _push_undo_state(self) -> None:
+        """Snapshot current obstacles, drivable, erase_polygons, goals, path for undo."""
         self._undo_history.append({
-            "obstacles": [list(p) for p in self.obstacles],
-            "drivable": [list(p) for p in self.drivable],
-            "erase_polygons": [list(p) for p in self.erase_polygons],
+            "obstacles": [(list(ext), [list(h) for h in ints]) for (ext, ints) in self.obstacles],
+            "drivable": [(list(ext), [list(h) for h in ints]) for (ext, ints) in self.drivable],
+            "erase_polygons": [(list(ext), [list(h) for h in ints]) for (ext, ints) in self.erase_polygons],
             "goals": list(self.goals),
             "path": list(self.path),
         })
 
     def _undo(self) -> None:
+        """Restore last snapshot; no-op if history empty."""
         if not self._undo_history:
             return
         state = self._undo_history.pop()
-        self.obstacles = [list(p) for p in state["obstacles"]]
-        self.drivable = [list(p) for p in state["drivable"]]
-        self.erase_polygons = [list(p) for p in state["erase_polygons"]]
+        self.obstacles = [(list(ext), [list(h) for h in ints]) for (ext, ints) in state["obstacles"]]
+        self.drivable = [(list(ext), [list(h) for h in ints]) for (ext, ints) in state["drivable"]]
+        self.erase_polygons = [(list(ext), [list(h) for h in ints]) for (ext, ints) in state["erase_polygons"]]
         self.goals = list(state["goals"])
         self.path = list(state["path"])
 
+    def _clear_erase_region_screen(self, screen_pts: list[tuple[float, float]]) -> None:
+        """Clear this polygon region on erase_brush_surface (draw black) so new obstacle/drivable is visible."""
+        if self.erase_brush_surface is None or len(screen_pts) < 3:
+            return
+        pts = [(int(p[0]), int(p[1])) for p in screen_pts]
+        pygame.draw.polygon(self.erase_brush_surface, (0, 0, 0), pts)
+
+    def _clear_brush_region_screen(self, screen_pts: list[tuple[float, float]]) -> None:
+        """Clear this polygon on brush and drivable_brush surfaces so the cut removes painted strokes there."""
+        if len(screen_pts) < 3:
+            return
+        pts = [(int(p[0]), int(p[1])) for p in screen_pts]
+        if self.brush_surface is not None:
+            pygame.draw.polygon(self.brush_surface, (0, 0, 0), pts)
+        if self.drivable_brush_surface is not None:
+            pygame.draw.polygon(self.drivable_brush_surface, (0, 0, 0), pts)
+
     def _commit_polygon(self) -> None:
+        """Commit current_polygon: add as obstacle/drivable (and clear erase in that region) or apply as cut.
+        Works for polygons fully inside holes (adds as new poly; hole-fill mask keeps it visible). <3 pts no-op."""
         if len(self.current_polygon) < 3:
             return
         self._push_undo_state()
         poly = self.current_polygon.copy()
         if self.terrain == TERRAIN_OBSTACLE:
-            self.obstacles.append(poly)
+            self.obstacles.append((poly, []))
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_erase_region_screen(pts)
         elif self.terrain == TERRAIN_DRIVABLE:
-            self.drivable.append(poly)
+            self.drivable.append((poly, []))
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_erase_region_screen(pts)
         else:
-            self.erase_polygons.append(poly)
+            cut_geom = _terrain_poly_to_geom(poly)
+            if cut_geom is not None:
+                self._subtract_cut_from_terrain(cut_geom)
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_brush_region_screen(pts)
 
     def _commit_rect(self) -> None:
+        """Commit box from rect_start/rect_end: add as obstacle/drivable or apply as cut. Degenerate rect (<1px) discarded."""
         if not self.rect_start or not self.rect_end:
             return
-        self._push_undo_state()
         x0, y0, x1, y1 = *self.rect_start, *self.rect_end
+        if abs(x1 - x0) < 1 and abs(y1 - y0) < 1:
+            self.rect_start = self.rect_end = None
+            return
+        self._push_undo_state()
         poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         if self.terrain == TERRAIN_OBSTACLE:
-            self.obstacles.append(poly)
+            self.obstacles.append((poly, []))
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_erase_region_screen(pts)
         elif self.terrain == TERRAIN_DRIVABLE:
-            self.drivable.append(poly)
+            self.drivable.append((poly, []))
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_erase_region_screen(pts)
         else:
-            self.erase_polygons.append(poly)
+            cut_geom = _terrain_poly_to_geom(poly)
+            if cut_geom is not None:
+                self._subtract_cut_from_terrain(cut_geom)
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
+            self._clear_brush_region_screen(pts)
         self.rect_start = self.rect_end = None
 
     def _brush_draw(self, pos: tuple[int, int]) -> None:
+        """One brush stroke at screen pos: obstacle/drivable = draw circle on brush surface; cut = subtract circle from terrain and clear brush there. Works anywhere (e.g. inside holes)."""
         if self.terrain == TERRAIN_OBSTACLE and self.brush_surface:
             pygame.draw.circle(self.brush_surface, COLOR_OBSTACLE, pos, BRUSH_RADIUS)
+            if self.erase_brush_surface is not None:
+                pygame.draw.circle(self.erase_brush_surface, (0, 0, 0), pos, BRUSH_RADIUS)
         elif self.terrain == TERRAIN_DRIVABLE and self.drivable_brush_surface:
             pygame.draw.circle(self.drivable_brush_surface, COLOR_DRIVABLE, pos, BRUSH_RADIUS)
-        elif self.terrain == TERRAIN_CUT and self.erase_brush_surface and self._bg_surface is not None:
-            r = pygame.Rect(pos[0] - BRUSH_RADIUS, pos[1] - BRUSH_RADIUS, 2 * BRUSH_RADIUS, 2 * BRUSH_RADIUS)
-            r.clamp_ip(self._bg_surface.get_rect())
-            if r.width > 0 and r.height > 0:
-                sub = self._bg_surface.subsurface(r).copy()
-                self.erase_brush_surface.blit(sub, r.topleft)
+            if self.erase_brush_surface is not None:
+                pygame.draw.circle(self.erase_brush_surface, (0, 0, 0), pos, BRUSH_RADIUS)
+        elif self.terrain == TERRAIN_CUT:
+            mx, my = self._screen_to_map_pixel(pos[0], pos[1])
+            try:
+                circle = Point(mx, my).buffer(BRUSH_RADIUS)
+                if not circle.is_empty:
+                    self._subtract_cut_from_terrain(circle)
+            except Exception:
+                pass
+            if self.brush_surface is not None:
+                pygame.draw.circle(self.brush_surface, (0, 0, 0), pos, BRUSH_RADIUS)
+            if self.drivable_brush_surface is not None:
+                pygame.draw.circle(self.drivable_brush_surface, (0, 0, 0), pos, BRUSH_RADIUS)
 
     def _draw_sidebar(self) -> None:
+        """Draw tool keys (1/2/3), terrain (A/S/D), goal/path (W/E), save/undo, Esc."""
         default = (200, 200, 200)
-        items = [
+        line_h = self._font.get_height() + 4
+        gap = 12
+        y = 8
+        # Tools
+        for key, label, active in [
             ("1", "Poly", self.tool == TOOL_POLYGON),
             ("2", "Brush", self.tool == TOOL_BRUSH),
             ("3", "Box", self.tool == TOOL_RECT),
-            ("A", "Obst", self.terrain == TERRAIN_OBSTACLE),
-            ("S", "Drive", self.terrain == TERRAIN_DRIVABLE),
-            ("D", "Cut", self.terrain == TERRAIN_CUT),
-            ("W", "Goal", self.tool == TOOL_GOAL),
-            ("E", "Path", self.tool == TOOL_PATH),
-        ]
-        y = 8
-        for key, label, active in items:
+        ]:
             c = COLOR_TOOL_ACTIVE if active else default
             t = self._font.render(f"{key} {label}", True, c)
             self.screen.blit(t, (6, y))
-            y += t.get_height() + 4
+            y += line_h
+        y += gap
+        # Terrains
+        for key, label, active in [
+            ("A", "Obst", self.terrain == TERRAIN_OBSTACLE),
+            ("S", "Drive", self.terrain == TERRAIN_DRIVABLE),
+            ("D", "Cut", self.terrain == TERRAIN_CUT),
+        ]:
+            c = COLOR_TOOL_ACTIVE if active else default
+            t = self._font.render(f"{key} {label}", True, c)
+            self.screen.blit(t, (6, y))
+            y += line_h
+        # Commands — bottom left of sidebar
+        cmd_y = self.height - 5 * line_h - 8
+        for key, label, active in [("W", "Goal", self.tool == TOOL_GOAL), ("E", "Path", self.tool == TOOL_PATH)]:
+            c = COLOR_TOOL_ACTIVE if active else default
+            t = self._font.render(f"{key} {label}", True, c)
+            self.screen.blit(t, (6, cmd_y))
+            cmd_y += line_h
         now = time.time()
         if now < self._save_flash_until:
             t = self._font.render("Saved", True, COLOR_TOOL_ACTIVE)
         else:
             t = self._font.render("Ctrl+S Save", True, default)
-        self.screen.blit(t, (6, y))
-        y += t.get_height() + 4
+        self.screen.blit(t, (6, cmd_y))
+        cmd_y += line_h
         t = self._font.render("Ctrl+Z Undo", True, default)
-        self.screen.blit(t, (6, y))
+        self.screen.blit(t, (6, cmd_y))
+        cmd_y += line_h
+        t = self._font.render("Esc Close", True, default)
+        self.screen.blit(t, (6, cmd_y))
 
     def _draw_tool_bar(self) -> None:
+        """Draw sidebar (tools, terrain, save/undo)."""
         self._draw_sidebar()
-        t = self._font.render("Ctrl+S Save  Ctrl+Z Undo  Esc Close", True, (180, 180, 180))
-        self.screen.blit(t, (SIDEBAR_WIDTH + 8, self.height - 20))
 
     def _preview_color(self) -> tuple[int, int, int]:
+        """Color for preview (rect/polygon) based on current terrain mode."""
         if self.terrain == TERRAIN_OBSTACLE:
             return COLOR_OBSTACLE_PREVIEW
         if self.terrain == TERRAIN_DRIVABLE:
             return COLOR_DRIVABLE_PREVIEW
+        if self.terrain == TERRAIN_CUT:
+            return COLOR_CUT_PREVIEW
         return COLOR_BG
 
     def _render(self) -> None:
+        """Full frame: grid, drivable (with holes as BG), obstacles (with holes), hole-fill from base (excluding polygon interiors so draw-in-hole stays visible), brush overlays, preview, goals/path, robot, sidebar."""
         if self.background is not None:
             self.screen.blit(self.background, (0, 0))
         else:
             self._draw_grid(self.screen)
-        for poly in self.drivable:
-            if len(poly) < 3:
+        for (ext, ints) in self.drivable:
+            if len(ext) < 3:
                 continue
-            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-            pygame.draw.polygon(self.screen, COLOR_DRIVABLE, pts)
-            pygame.draw.polygon(self.screen, (200, 200, 200), pts, 1)
-        for poly in self.obstacles:
-            if len(poly) < 3:
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+            pygame.draw.polygon(self.screen, COLOR_DRIVABLE, [(int(x), int(y)) for x, y in pts])
+            pygame.draw.polygon(self.screen, (200, 200, 200), [(int(x), int(y)) for x, y in pts], 1)
+            for hole in ints:
+                if len(hole) >= 3:
+                    pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                    pygame.draw.polygon(self.screen, COLOR_BG, [(int(x), int(y)) for x, y in pts_h])
+        for (ext, ints) in self.obstacles:
+            if len(ext) < 3:
                 continue
-            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-            pygame.draw.polygon(self.screen, COLOR_OBSTACLE, pts)
-            pygame.draw.polygon(self.screen, (220, 100, 100), pts, 1)
-        for poly in self.erase_polygons:
-            if len(poly) < 3:
-                continue
-            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-            pygame.draw.polygon(self.screen, COLOR_BG, pts)
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+            pygame.draw.polygon(self.screen, COLOR_OBSTACLE, [(int(x), int(y)) for x, y in pts])
+            pygame.draw.polygon(self.screen, (220, 100, 100), [(int(x), int(y)) for x, y in pts], 1)
+            for hole in ints:
+                if len(hole) >= 3:
+                    pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                    pygame.draw.polygon(self.screen, COLOR_BG, [(int(x), int(y)) for x, y in pts_h])
+        base_surf = self._bg_surface if self._bg_surface is not None else self.background
+        if base_surf is not None:
+            # Hole mask: fill only "empty" hole pixels with grid, not regions covered by another polygon.
+            # So we can draw (brush/polygon) inside a hole and it stays visible (not overwritten by grid).
+            mask_surf = pygame.Surface((self.width, self.height))
+            mask_surf.fill((0, 0, 0))
+            for (ext, ints) in self.drivable:
+                for hole in ints:
+                    if len(hole) >= 3:
+                        pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                        pygame.draw.polygon(mask_surf, (255, 255, 255), [(int(x), int(y)) for x, y in pts_h])
+            for (ext, ints) in self.obstacles:
+                for hole in ints:
+                    if len(hole) >= 3:
+                        pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                        pygame.draw.polygon(mask_surf, (255, 255, 255), [(int(x), int(y)) for x, y in pts_h])
+            # Punch out each polygon's *filled* region (exterior minus its holes) so that polygons
+            # drawn inside a hole (e.g. drivable island) are not overwritten by the grid fill.
+            for (ext, ints) in self.drivable:
+                if len(ext) >= 3:
+                    pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+                    pygame.draw.polygon(mask_surf, (0, 0, 0), [(int(x), int(y)) for x, y in pts])
+                    for hole in ints:
+                        if len(hole) >= 3:
+                            pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                            pygame.draw.polygon(mask_surf, (255, 255, 255), [(int(x), int(y)) for x, y in pts_h])
+            for (ext, ints) in self.obstacles:
+                if len(ext) >= 3:
+                    pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+                    pygame.draw.polygon(mask_surf, (0, 0, 0), [(int(x), int(y)) for x, y in pts])
+                    for hole in ints:
+                        if len(hole) >= 3:
+                            pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                            pygame.draw.polygon(mask_surf, (255, 255, 255), [(int(x), int(y)) for x, y in pts_h])
+            mask_arr = np.transpose(pygame.surfarray.array3d(mask_surf), (1, 0, 2))[:, :, 0] > 128
+            if np.any(mask_arr):
+                screen_arr = np.transpose(pygame.surfarray.array3d(self.screen), (1, 0, 2)).copy()
+                bg_arr = np.transpose(pygame.surfarray.array3d(base_surf), (1, 0, 2))
+                for c in range(3):
+                    screen_arr[:, :, c] = np.where(mask_arr, bg_arr[:, :, c], screen_arr[:, :, c])
+                pygame.surfarray.blit_array(self.screen, np.transpose(screen_arr, (1, 0, 2)))
         if self.drivable_brush_surface is not None:
             self.screen.blit(self.drivable_brush_surface, (0, 0))
         if self.brush_surface is not None:
@@ -323,6 +582,7 @@ class MapViewer:
         pygame.display.flip()
 
     def _compose_map_image(self) -> np.ndarray:
+        """Build export image: base (bg or grid), then drivable (with holes black), brush, obstacles (with holes black). Order ensures brush and polys drawn in holes appear correctly."""
         if self.background is not None:
             base = pygame.surfarray.array3d(self.background)
         elif self._bg_surface is not None:
@@ -334,53 +594,52 @@ class MapViewer:
         temp = pygame.Surface((self.width, self.height))
         temp.fill((0, 0, 0))
         temp.set_colorkey((0, 0, 0))
-        for poly in self.drivable:
-            if len(poly) >= 3:
-                pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-                pygame.draw.polygon(temp, COLOR_DRIVABLE, pts)
+        for (ext, ints) in self.drivable:
+            if len(ext) >= 3:
+                pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+                pygame.draw.polygon(temp, COLOR_DRIVABLE, [(int(x), int(y)) for x, y in pts])
+                for hole in ints:
+                    if len(hole) >= 3:
+                        pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                        pygame.draw.polygon(temp, (0, 0, 0), [(int(x), int(y)) for x, y in pts_h])
         if self.drivable_brush_surface is not None:
             temp.blit(self.drivable_brush_surface, (0, 0))
-        for poly in self.obstacles:
-            if len(poly) >= 3:
-                pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-                pygame.draw.polygon(temp, COLOR_OBSTACLE, pts)
+        for (ext, ints) in self.obstacles:
+            if len(ext) >= 3:
+                pts = [self._map_pixel_to_screen(p[0], p[1]) for p in ext]
+                pygame.draw.polygon(temp, COLOR_OBSTACLE, [(int(x), int(y)) for x, y in pts])
+                for hole in ints:
+                    if len(hole) >= 3:
+                        pts_h = [self._map_pixel_to_screen(p[0], p[1]) for p in hole]
+                        pygame.draw.polygon(temp, (0, 0, 0), [(int(x), int(y)) for x, y in pts_h])
         if self.brush_surface is not None:
             temp.blit(self.brush_surface, (0, 0))
         drawn = np.transpose(pygame.surfarray.array3d(temp), (1, 0, 2))
         drawn_mask = (drawn[:, :, 0] > 0) | (drawn[:, :, 1] > 0) | (drawn[:, :, 2] > 0)
         for c in range(3):
             base[:, :, c] = np.where(drawn_mask, drawn[:, :, c], base[:, :, c])
-        if self.erase_polygons or (self.erase_brush_surface is not None):
-            mask_surf = pygame.Surface((self.width, self.height))
-            mask_surf.fill((0, 0, 0))
-            for poly in self.erase_polygons:
-                if len(poly) >= 3:
-                    pts = [self._map_pixel_to_screen(p[0], p[1]) for p in poly]
-                    pygame.draw.polygon(mask_surf, (255, 255, 255), pts)
-            poly_mask = np.transpose(pygame.surfarray.array3d(mask_surf), (1, 0, 2))[:, :, 0] > 128
-            if self.erase_brush_surface is not None:
-                arr = np.transpose(pygame.surfarray.array3d(self.erase_brush_surface), (1, 0, 2))
-                brush_mask = (arr[:, :, 0] > 0) | (arr[:, :, 1] > 0) | (arr[:, :, 2] > 0)
-                poly_mask = poly_mask | brush_mask
-            restore = np.transpose(pygame.surfarray.array3d(
-                self._bg_surface if self._bg_surface is not None else self.background
-            ), (1, 0, 2))
-            for c in range(3):
-                base[:, :, c] = np.where(poly_mask, restore[:, :, c], base[:, :, c])
         return base
 
     def _save(self, path_prefix: str) -> None:
+        """Write map image (composed) and JSON (obstacles, drivable with exteriors/interiors, goals, path). erase_polygons not persisted (cuts are baked into terrain)."""
         meta = dict(self.metadata)
         meta["goals"] = [[float(p[0]), float(p[1])] for p in self.goals]
         meta["path"] = [[float(p[0]), float(p[1])] for p in self.path]
-        meta["obstacles"] = [[[float(x), float(y)] for x, y in p] for p in self.obstacles]
-        meta["drivable"] = [[[float(x), float(y)] for x, y in p] for p in self.drivable]
-        meta["erase_polygons"] = [[[float(x), float(y)] for x, y in p] for p in self.erase_polygons]
+        meta["obstacles"] = [
+            {"exterior": [[float(x), float(y)] for x, y in ext], "interiors": [[[float(x), float(y)] for x, y in h] for h in ints]}
+            for (ext, ints) in self.obstacles
+        ]
+        meta["drivable"] = [
+            {"exterior": [[float(x), float(y)] for x, y in ext], "interiors": [[[float(x), float(y)] for x, y in h] for h in ints]}
+            for (ext, ints) in self.drivable
+        ]
+        meta["erase_polygons"] = []
         map_utils.save_map(path_prefix, self._compose_map_image(), meta)
         self._save_flash_until = time.time() + 0.6
         print(f"Saved {path_prefix}.png and {path_prefix}.json")
 
     def run(self, save_path_prefix: str | None = None) -> None:
+        """Main loop: events (click for goal/path/polygon/rect/brush, close polygon on repeat click or RMB, Ctrl+S save, Ctrl+Z undo, Esc cancel or quit), then _render."""
         save_path_prefix = save_path_prefix or "data/maps/map"
         while self.running:
             for event in pygame.event.get():
@@ -453,9 +712,11 @@ class MapViewer:
                         self.current_path.clear()
                         if not self.current_polygon and self.rect_start is None:
                             self.running = False
-                    elif event.key == pygame.K_s and (pygame.key.get_mods() & pygame.KMOD_CTRL):
+                    mod = pygame.key.get_mods()
+                    ctrl_or_cmd = mod & (pygame.KMOD_CTRL | pygame.KMOD_META)
+                    if event.key == pygame.K_s and ctrl_or_cmd:
                         self._save(save_path_prefix)
-                    elif event.key == pygame.K_z and (pygame.key.get_mods() & pygame.KMOD_CTRL):
+                    elif event.key == pygame.K_z and ctrl_or_cmd:
                         self._undo()
                     elif event.key == pygame.K_1:
                         self.tool = TOOL_POLYGON
