@@ -10,8 +10,10 @@
     "origin_world_adjust": [0, 0]
   },
   "pose": {
-    "pose_swap_xy": false,
+    "pose_swap_xy": true,
     "pose_pixel_flip_y": false,
-    "pose_yaw_offset_deg": 0
+    "pose_yaw_offset_deg": 90,
+    "map_mirror_x": true,
+    "map_mirror_y": false
   }
 }

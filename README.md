@@ -11,7 +11,11 @@ When `config/boxsim.json` is missing, [config/boxsim.example.json](config/boxsim
 
 - **`capture.mode`**: `pawn_xy` centers the ortho camera on the pawn (same XY) and uses `ortho_width` / `ortho_height` for how much world fits in the shot. `aabb` uses `capture.bounds` as `[xmin, xmax, ymin, ymax]` in UE world XY: camera looks at the box center and ortho spans match that rectangle.
 - **`capture.camera_z_offset`**: height of the virtual lit camera above the pawn Z. For an **orthographic** top-down shot this does **not** change zoom; it only shifts along the view axis. **Zoom / field of view** is **`ortho_width` and `ortho_height`** (and UE/sensor aspect).
-- **`pose`**: `pose_swap_xy`, `pose_pixel_flip_y`, `pose_yaw_offset_deg` are written into map metadata so the pygame robot overlay matches your UE axes.
+- **`pose`**: Written into map metadata for the robot overlay:
+  - **`pose_swap_xy`**: when **true**, pawn **UE Y** drives **horizontal** pygame motion (+UE **Y** → +screen **X**), and UE **X** drives vertical — matches many top-down UE5 shots.
+  - **`pose_yaw_offset_deg`**: adds to Unreal yaw before drawing the triangle (try **90** or **-90** if forward points wrong).
+  - **`map_mirror_x` / `map_mirror_y`**: flip map ↔ screen along one axis if a world direction still moves backward in pygame.
+  - **`pose_pixel_flip_y`**: vertical flip in map-pixel space (screenshot vs manual).
 
 Env overrides (when set) win over the file: `BOXSIM_CAPTURE_WORLD_BOUNDS`, `BOXSIM_CAPTURE_USE_PAWN_XY`, `BOXSIM_ORTHO_WIDTH`, `BOXSIM_ORTHO_HEIGHT`, `BOXSIM_CAMERA_Z_OFFSET`, `BOXSIM_POSE_*`, etc. See [builder/capture_config.py](builder/capture_config.py).
 

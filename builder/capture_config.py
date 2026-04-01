@@ -124,6 +124,11 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
     if _env_bool("BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT"):
         cap["swap_ortho_width_height"] = True
 
+    if _env_bool("BOXSIM_MAP_MIRROR_X"):
+        pose["map_mirror_x"] = True
+    if _env_bool("BOXSIM_MAP_MIRROR_Y"):
+        pose["map_mirror_y"] = True
+
     oadj = os.environ.get("BOXSIM_ORIGIN_WORLD_ADJUST", "").strip()
     if oadj:
         parts = [p.strip() for p in oadj.split(",")]
@@ -174,6 +179,15 @@ def pose_meta_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "pose_pixel_flip_y": bool(pose.get("pose_pixel_flip_y", False)),
         "pose_yaw_offset_deg": float(pose.get("pose_yaw_offset_deg", 0.0)),
     }
+
+
+def map_display_meta_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Pose flags + optional mirrors for map × screen (+UE Y → +screen X uses pose_swap_xy)."""
+    pose = cfg.get("pose") or {}
+    meta = pose_meta_from_config(cfg)
+    meta["map_mirror_x"] = bool(pose.get("map_mirror_x", False))
+    meta["map_mirror_y"] = bool(pose.get("map_mirror_y", False))
+    return meta
 
 
 def apply_origin_world_adjust(cfg: dict[str, Any], cx: float, cy: float) -> tuple[float, float]:

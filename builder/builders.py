@@ -16,7 +16,7 @@ from .capture_config import (
     capture_camera_z_from_config,
     capture_ortho_from_config,
     load_boxsim_config,
-    pose_meta_from_config,
+    map_display_meta_from_config,
     resolve_capture_bounds,
 )
 from .viewer import MapViewer
@@ -391,7 +391,7 @@ class ScreenshotMapBuilder:
                 "capture_native_height": int(native_h),
                 "capture_transpose_lit_image": bool(cap_cfg.get("transpose_lit_image", False)),
                 "capture_swap_ortho_width_height": bool(cap_cfg.get("swap_ortho_width_height", False)),
-                **pose_meta_from_config(self._cfg),
+                **map_display_meta_from_config(self._cfg),
             }
             if bounds is not None:
                 meta["capture_world_bounds"] = [bounds[0], bounds[1], bounds[2], bounds[3]]
@@ -439,7 +439,7 @@ class ManualMapBuilder:
             "ortho_height": self.world_height,
             "world_height": self.world_height,
             "world_bounds": [-half_w, half_w, -half_h, half_h],
-            **pose_meta_from_config(self._cfg),
+            **map_display_meta_from_config(self._cfg),
         }
         def pose_getter():
             if agent is None or not agent.is_connected():

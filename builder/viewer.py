@@ -201,6 +201,8 @@ class MapViewer:
         self.scale_x = _sx
         self.scale_y = _sy
         self.scale = _sx
+        self._map_mirror_x = bool(self.metadata.get("map_mirror_x", False))
+        self._map_mirror_y = bool(self.metadata.get("map_mirror_y", False))
         self.obstacles = self._load_terrain_polys(self.metadata.get("obstacles", []))
         self.drivable = self._load_terrain_polys(self.metadata.get("drivable", []))
         loaded_erase = self._load_erase_polygons(self.metadata.get("erase_polygons", []))
@@ -434,10 +436,18 @@ class MapViewer:
         kx, ky = self._map_window_scale_k()
         mx = (sx - self.view_center[0] - self.view_offset_x) / kx
         my = -(sy - self.view_center[1] - self.view_offset_y) / ky
+        if self._map_mirror_x:
+            mx = -mx
+        if self._map_mirror_y:
+            my = -my
         return (mx, my)
 
     def _map_pixel_to_screen(self, mx: float, my: float) -> tuple[float, float]:
         """Map coords to screen (pixel). Inverse of _screen_to_map_pixel."""
+        if self._map_mirror_x:
+            mx = -mx
+        if self._map_mirror_y:
+            my = -my
         kx, ky = self._map_window_scale_k()
         return (
             self.view_center[0] + mx * kx + self.view_offset_x,
@@ -838,6 +848,8 @@ class MapViewer:
         meta["pose_pixel_flip_y"] = self._pose_pixel_flip_y
         meta["pose_swap_xy"] = self._pose_swap_xy
         meta["pose_yaw_offset_deg"] = self._pose_yaw_offset_deg
+        meta["map_mirror_x"] = self._map_mirror_x
+        meta["map_mirror_y"] = self._map_mirror_y
         if self._capture_native_w > 0 and self._capture_native_h > 0:
             meta["capture_native_width"] = self._capture_native_w
             meta["capture_native_height"] = self._capture_native_h
