@@ -39,14 +39,21 @@ COLOR_ROBOT_OUTLINE = (60, 120, 60)
 COLOR_AXIS = (100, 100, 120)
 GRID_OVERLAY_GRID_ALPHA = 110
 GRID_OVERLAY_AXIS_ALPHA = 230
-GRID_OVERLAY_LABEL = (240, 242, 255)
+GRID_OVERLAY_LABEL = (0, 0, 0)
+GRID_OVERLAY_LABEL_PAD_X = 18
+GRID_OVERLAY_LABEL_PAD_Y = 18
 BRUSH_RADIUS = 8
 GRID_SIZE = 50
 POSE_POLL_INTERVAL = 0.2
 CLOSE_POINT_RADIUS = 12
 COLOR_TOOL_ACTIVE = (120, 255, 120)
 GOAL_RADIUS = 10
-COORD_TICK_INTERVAL = 100
+COORD_TICK_INTERVAL = 200
+GRID_LABEL_PAD_X = 6
+GRID_LABEL_PAD_Y = 6
+# World extent for axis/grid (matches screenshot ortho framing in builders).
+WORLD_GRID_X_MIN, WORLD_GRID_X_MAX = -750, 200
+WORLD_GRID_Y_MIN, WORLD_GRID_Y_MAX = -300, 750
 SIDEBAR_WIDTH = 92
 
 
@@ -234,6 +241,8 @@ class MapViewer:
         pygame.display.set_caption("Map Builder")
         self.clock = pygame.time.Clock()
         self._font = pygame.font.Font(None, 24)
+        self._capture_native_w = int(self.metadata.get("capture_native_width") or 0)
+        self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
         self._make_brush_surfaces()
         self._build_bg_surface()
         self._build_grid_overlay()
@@ -244,8 +253,6 @@ class MapViewer:
         self._pose_pixel_flip_y = _pose_pixel_flip_y_from_config(self.metadata, self.background is not None)
         self._pose_swap_xy = _pose_swap_xy_from_config(self.metadata, self.background is not None)
         self._pose_yaw_offset_deg = _pose_yaw_offset_deg_from_config(self.metadata)
-        self._capture_native_w = int(self.metadata.get("capture_native_width") or 0)
-        self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
 
     def _make_brush_surfaces(self) -> None:
         """Create/resize overlay surfaces for brush and erase; black fill, colorkey black for transparency."""
@@ -258,15 +265,17 @@ class MapViewer:
     def _draw_world_coord_grid(self, surface: pygame.Surface, *, overlay: bool) -> None:
         """World-space grid in map pixels (same as manual mode). overlay=True: RGBA on SRCALPHA surface over screenshot."""
         vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
-        lo, hi = -500, 500
         step = COORD_TICK_INTERVAL
+        pad_x = GRID_OVERLAY_LABEL_PAD_X if overlay else GRID_LABEL_PAD_X
+        pad_y = GRID_OVERLAY_LABEL_PAD_Y if overlay else GRID_LABEL_PAD_Y
         if overlay:
             c_grid = (*COLOR_GRID, GRID_OVERLAY_GRID_ALPHA)
             c_axis = (*COLOR_AXIS, GRID_OVERLAY_AXIS_ALPHA)
             c_label = GRID_OVERLAY_LABEL
         else:
             c_grid, c_axis, c_label = COLOR_GRID, COLOR_AXIS, COLOR_AXIS
-        for wx in range(lo, hi + 1, step):
+        wx = WORLD_GRID_X_MIN
+        while wx <= WORLD_GRID_X_MAX:
             mx = wx * self.scale
             px, _ = self._map_pixel_to_screen(mx, 0)
             if -20 <= px < self.width + 20:
@@ -274,16 +283,19 @@ class MapViewer:
                 col = c_axis if wx == 0 else c_grid
                 pygame.draw.line(surface, col, (int(px), 0), (int(px), self.height), w)
                 t = self._font.render(str(wx), True, c_label)
-                surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + 4))
-        for wy in range(lo, hi + 1, step):
-            my = wy * self.scale
+                surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + pad_y))
+            wx += step
+        world_y = WORLD_GRID_Y_MIN
+        while world_y <= WORLD_GRID_Y_MAX:
+            my = -world_y * self.scale
             _, py = self._map_pixel_to_screen(0, my)
             if -20 <= py < self.height + 20:
-                w = 2 if wy == 0 else 1
-                col = c_axis if wy == 0 else c_grid
+                w = 2 if world_y == 0 else 1
+                col = c_axis if world_y == 0 else c_grid
                 pygame.draw.line(surface, col, (0, int(py)), (self.width, int(py)), w)
-                t = self._font.render(str(-wy), True, c_label)
-                surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
+                t = self._font.render(str(world_y), True, c_label)
+                surface.blit(t, (int(vc[0]) - t.get_width() - pad_x, int(py) - t.get_height() // 2))
+            world_y += step
 
     def _build_bg_surface(self) -> None:
         """Build grid background (when no image): axes and ticks in map coords; used for hole fill and base."""

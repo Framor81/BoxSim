@@ -16,8 +16,11 @@ from .viewer import MapViewer
 if TYPE_CHECKING:
     from agent import UnrealAgent
 
-DEFAULT_CAMERA_HEIGHT = 1000
-DEFAULT_ORTHO_WIDTH = 4000
+# Closer to the ground (smaller Z offset above pawn) for top-down capture.
+DEFAULT_CAMERA_HEIGHT = 350
+# Ortho frustum (world units) aligned with viewer grid: x in [-750,200], y in [-300,750].
+DEFAULT_ORTHO_WIDTH = 950
+DEFAULT_ORTHO_HEIGHT = 1050
 
 # Lit captures come from your scene sensor (e.g. FusionCamSensor), not camera 0 (pawn/view target).
 # Use vget /cameras → pick a non-zero id, or set BOXSIM_UNREALCV_CAMERA_ID=1 (etc.).
@@ -209,6 +212,7 @@ class ScreenshotMapBuilder:
         screenshot_path: str | Path = "data/screenshots/topdown.png",
         camera_height: float = DEFAULT_CAMERA_HEIGHT,
         ortho_width: float = DEFAULT_ORTHO_WIDTH,
+        ortho_height: float = DEFAULT_ORTHO_HEIGHT,
         viewer_width: int = 1024,
         viewer_height: int = 768,
         save_path_prefix: str = "data/maps/map",
@@ -216,6 +220,7 @@ class ScreenshotMapBuilder:
         self.screenshot_path = Path(screenshot_path)
         self.camera_height = camera_height
         self.ortho_width = ortho_width
+        self.ortho_height = ortho_height
         self.viewer_width = viewer_width
         self.viewer_height = viewer_height
         self.save_path_prefix = save_path_prefix
@@ -280,12 +285,12 @@ class ScreenshotMapBuilder:
             vset("ortho_width", f"vset /camera/{cam_id}/ortho_width {self.ortho_width}")
             vset("location", f"vset /camera/{cam_id}/location {cx} {cy} {cz}")
             vset("rotation", f"vset /camera/{cam_id}/rotation {rot_str}")
-            oh = os.environ.get("BOXSIM_ORTHO_HEIGHT", "").strip()
-            if oh:
-                try:
-                    vset("ortho_height", f"vset /camera/{cam_id}/ortho_height {float(oh)}")
-                except ValueError:
-                    pass
+            oh_raw = os.environ.get("BOXSIM_ORTHO_HEIGHT", "").strip()
+            try:
+                oh = float(oh_raw) if oh_raw else float(self.ortho_height)
+                vset("ortho_height", f"vset /camera/{cam_id}/ortho_height {oh}")
+            except ValueError:
+                pass
 
             cam_err = _verify_camera_responds(client, cam_id, debug)
             if cam_err:
@@ -337,6 +342,7 @@ class ScreenshotMapBuilder:
                 "origin": [0, 0],
                 "scale": scale_from_ortho_width(self.ortho_width, native_w),
                 "ortho_width": self.ortho_width,
+                "ortho_height": float(self.ortho_height),
                 # Pose math is in native lit-image pixels; viewer scales bg to window — must scale offsets too.
                 "capture_native_width": int(native_w),
                 "capture_native_height": int(native_h),
@@ -357,8 +363,8 @@ class ManualMapBuilder:
     def __init__(
         self,
         *,
-        world_width: float = 1000,
-        world_height: float = 1000,
+        world_width: float = DEFAULT_ORTHO_WIDTH,
+        world_height: float = DEFAULT_ORTHO_HEIGHT,
         viewer_width: int = 1024,
         viewer_height: int = 768,
         save_path_prefix: str = "data/maps/manual_map",
