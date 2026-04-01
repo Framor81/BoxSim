@@ -18,9 +18,12 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "ortho_width": 2000.0,
         "ortho_height": 2000.0,
         "camera_z_offset": None,
+        "swap_ortho_width_height": False,
+        "transpose_lit_image": False,
+        "origin_world_adjust": [0.0, 0.0],
     },
     "pose": {
-        "pose_swap_xy": True,
+        "pose_swap_xy": False,
         "pose_pixel_flip_y": False,
         "pose_yaw_offset_deg": 0.0,
     },
@@ -116,6 +119,20 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
         except ValueError:
             pass
 
+    if _env_bool("BOXSIM_TRANSPOSE_LIT_IMAGE"):
+        cap["transpose_lit_image"] = True
+    if _env_bool("BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT"):
+        cap["swap_ortho_width_height"] = True
+
+    oadj = os.environ.get("BOXSIM_ORIGIN_WORLD_ADJUST", "").strip()
+    if oadj:
+        parts = [p.strip() for p in oadj.split(",")]
+        if len(parts) == 2:
+            try:
+                cap["origin_world_adjust"] = [float(parts[0]), float(parts[1])]
+            except ValueError:
+                pass
+
 
 def resolve_capture_bounds(cfg: dict[str, Any]) -> tuple[float, float, float, float] | None:
     """UE AABB xmin,xmax,ymin,ymax for screenshot framing, or None for pawn-centered XY."""
@@ -153,7 +170,19 @@ def capture_camera_z_from_config(cfg: dict[str, Any], default_z: float) -> float
 def pose_meta_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
     pose = cfg.get("pose") or {}
     return {
-        "pose_swap_xy": bool(pose.get("pose_swap_xy", True)),
+        "pose_swap_xy": bool(pose.get("pose_swap_xy", False)),
         "pose_pixel_flip_y": bool(pose.get("pose_pixel_flip_y", False)),
         "pose_yaw_offset_deg": float(pose.get("pose_yaw_offset_deg", 0.0)),
     }
+
+
+def apply_origin_world_adjust(cfg: dict[str, Any], cx: float, cy: float) -> tuple[float, float]:
+    cap = cfg.get("capture") or {}
+    raw = cap.get("origin_world_adjust") or [0.0, 0.0]
+    if len(raw) != 2:
+        return (cx, cy)
+    try:
+        dx, dy = float(raw[0]), float(raw[1])
+    except (TypeError, ValueError):
+        return (cx, cy)
+    return (cx + dx, cy + dy)

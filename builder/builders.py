@@ -12,6 +12,7 @@ import numpy as np
 
 from map_utils import scales_from_ortho
 from .capture_config import (
+    apply_origin_world_adjust,
     capture_camera_z_from_config,
     capture_ortho_from_config,
     load_boxsim_config,
@@ -307,6 +308,13 @@ class ScreenshotMapBuilder:
                 capture_ortho_h = float(self.ortho_height)
                 debug["capture_xy_source"] = "pawn_xy / config ortho"
 
+            cap_cfg = self._cfg.get("capture") or {}
+            if bool(cap_cfg.get("swap_ortho_width_height", False)):
+                capture_ortho_w, capture_ortho_h = capture_ortho_h, capture_ortho_w
+                debug["capture_swap_ortho_width_height"] = True
+
+            cx, cy = apply_origin_world_adjust(self._cfg, cx, cy)
+
             rot_str = _screenshot_rotation_string()
             debug["capture_camera_id"] = cam_id
             debug["camera_world_xyz"] = (cx, cy, cz)
@@ -366,9 +374,11 @@ class ScreenshotMapBuilder:
                     f"Could not read image; vget returned {saved_to!r}. "
                     f"Files found among candidates: {debug.get('tried_exists', [])}"
                 )
-            if used != path:
-                cv2.imwrite(str(path), img)
+            if bool(cap_cfg.get("transpose_lit_image", False)):
+                img = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
+                debug["capture_transpose_lit_image"] = True
             native_h, native_w = img.shape[0], img.shape[1]
+            cv2.imwrite(str(path), img)
             sx, sy = scales_from_ortho(capture_ortho_w, float(oh_used), native_w, native_h)
             meta = {
                 "origin": [float(cx), float(cy)],
@@ -379,11 +389,17 @@ class ScreenshotMapBuilder:
                 "ortho_height": float(oh_used),
                 "capture_native_width": int(native_w),
                 "capture_native_height": int(native_h),
+                "capture_transpose_lit_image": bool(cap_cfg.get("transpose_lit_image", False)),
+                "capture_swap_ortho_width_height": bool(cap_cfg.get("swap_ortho_width_height", False)),
                 **pose_meta_from_config(self._cfg),
             }
             if bounds is not None:
                 meta["capture_world_bounds"] = [bounds[0], bounds[1], bounds[2], bounds[3]]
                 meta["world_bounds"] = meta["capture_world_bounds"]
+                meta["capture_bounds_center"] = [
+                    float((bounds[0] + bounds[1]) / 2.0),
+                    float((bounds[2] + bounds[3]) / 2.0),
+                ]
             if _debug_screenshot():
                 print("[BOXSIM_DEBUG_SCREENSHOT] ok, loaded from", used, "wrote", path)
             return (str(path), meta)

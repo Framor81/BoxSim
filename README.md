@@ -15,6 +15,8 @@ When `config/boxsim.json` is missing, [config/boxsim.example.json](config/boxsim
 
 Env overrides (when set) win over the file: `BOXSIM_CAPTURE_WORLD_BOUNDS`, `BOXSIM_CAPTURE_USE_PAWN_XY`, `BOXSIM_ORTHO_WIDTH`, `BOXSIM_ORTHO_HEIGHT`, `BOXSIM_CAMERA_Z_OFFSET`, `BOXSIM_POSE_*`, etc. See [builder/capture_config.py](builder/capture_config.py).
 
+**Agent / grid vs background drift** — The robot must use the **same** UE `(x, y)` as the grid labels. Keep **`pose_swap_xy": false`** unless your top-down image maps UE **X** to vertical and **Y** to horizontal on the bitmap. (Older builds defaulted swap on for screenshots and could place the pawn at `(y, x)` while the grid stayed in `(x, y)`.) If the **photo** still does not line up with the grid at a known landmark, try in order: **`capture.swap_ortho_width_height`** (`BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT=1`) if UE pairs ortho extents to the wrong image axis; **`capture.transpose_lit_image`** (`BOXSIM_TRANSPOSE_LIT_IMAGE=1`) if rows/columns vs world X/Y are swapped in the PNG; **`capture.origin_world_adjust": [dx, dy]`** (`BOXSIM_ORIGIN_WORLD_ADJUST=dx,dy`) to nudge the registered world center in small world units. **Recapture** after changing these so `map.json` matches the processed image.
+
 Fixed world rectangle (four UE corners as min/max), in `config/boxsim.json`:
 
 ```json
@@ -37,6 +39,8 @@ With `aabb`, `ortho_width`/`ortho_height` in the file are ignored for the Unreal
 
 **World coordinates on the map**  
 After a screenshot capture, `map.json` stores `origin` (world XY at the **center** of the image), `scale_x` / `scale_y` (native pixels per world unit along image X and Y), and optional `capture_world_bounds` / `world_bounds`. Native-lit offsets use `world_to_pixel` in [map_utils.py](map_utils.py); the viewer scales from native resolution to the pygame window. Older maps with only `scale` still load (`scale_y` defaults to `scale`).
+
+If a **top-down shot** shows landmarks hundreds of world units away from grid labels (e.g. UE `(-50,-90)` appears at tick `(-550,560)`), check **`origin`**: it must be the capture center **(~(-255, 200)** for the default AABB), not **`[0,0]`** from an old manual map. The viewer now **re-syncs** `capture_native_*` and `scale_*` from the actual PNG shape, and resets **`origin`** from `capture_bounds_center` / bounds when `origin` is zero or **> 25% of the span** away from that center. **Save** (Ctrl+S) to persist the fixed `origin` in `map.json`.
 
 **Features**
 - **Pose** — Poll pawn location (X, Y) and yaw at 5 Hz from Unreal.

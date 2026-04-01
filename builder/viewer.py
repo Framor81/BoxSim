@@ -85,7 +85,7 @@ def _pose_swap_xy_from_config(metadata: dict, has_background_image: bool) -> boo
         return False
     if "pose_swap_xy" in metadata:
         return bool(metadata["pose_swap_xy"])
-    return bool(has_background_image)
+    return False
 
 
 def _pose_yaw_offset_deg_from_config(metadata: dict) -> float:
@@ -229,6 +229,15 @@ class MapViewer:
         self._bg_surface: pygame.Surface | None = None
         self._grid_overlay: pygame.Surface | None = None
 
+        self._capture_native_w = int(self.metadata.get("capture_native_width") or 0)
+        self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
+        if background_image is not None:
+            self._sync_capture_native_and_scales_from_image(background_image)
+            self._reconcile_screenshot_origin()
+
+        self.view_center = (width // 2, height // 2)
+        pygame.init()
+        self._font = pygame.font.Font(None, 24)
         if background_image is not None:
             if background_image.ndim == 2:
                 bg = pygame.surfarray.make_surface(np.stack([background_image] * 3, axis=-1))
@@ -238,14 +247,9 @@ class MapViewer:
         else:
             self.background = None
 
-        self.view_center = (width // 2, height // 2)
-        pygame.init()
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         pygame.display.set_caption("Map Builder")
         self.clock = pygame.time.Clock()
-        self._font = pygame.font.Font(None, 24)
-        self._capture_native_w = int(self.metadata.get("capture_native_width") or 0)
-        self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
         has_bg = self.background is not None
         self._pose_pixel_flip_y = _pose_pixel_flip_y_from_config(self.metadata, has_bg)
         self._pose_swap_xy = _pose_swap_xy_from_config(self.metadata, has_bg)
@@ -257,6 +261,53 @@ class MapViewer:
         self._pose_cache: tuple[float, float, float] | None = None
         self._pose_cache_time = 0.0
         self._save_flash_until = 0.0
+
+    def _sync_capture_native_and_scales_from_image(self, background_image: np.ndarray) -> None:
+        """Use real H×W from the lit array; refresh scale_x/y from ortho if JSON size was wrong."""
+        if background_image.ndim < 2:
+            return
+        ah, aw = int(background_image.shape[0]), int(background_image.shape[1])
+        if ah <= 0 or aw <= 0:
+            return
+        if self._capture_native_w != aw or self._capture_native_h != ah:
+            self._capture_native_w, self._capture_native_h = aw, ah
+        ow = float(self.metadata.get("ortho_width", 0) or 0)
+        oh = float(self.metadata.get("ortho_height", 0) or 0)
+        if ow > 0 and oh > 0:
+            self.scale_x, self.scale_y = map_utils.scales_from_ortho(ow, oh, aw, ah)
+            self.scale = self.scale_x
+
+    def _reconcile_screenshot_origin(self) -> None:
+        """Fix grid/agent vs bitmap when origin is missing (0,0) or far from capture AABB center."""
+        raw = self.metadata.get("capture_world_bounds") or self.metadata.get("world_bounds")
+        ctr = self.metadata.get("capture_bounds_center")
+        bx: float | None = None
+        by: float | None = None
+        if ctr and len(ctr) == 2:
+            try:
+                bx, by = float(ctr[0]), float(ctr[1])
+            except (TypeError, ValueError):
+                pass
+        if bx is None and raw and len(raw) == 4:
+            try:
+                bx = (float(raw[0]) + float(raw[1])) / 2.0
+                by = (float(raw[2]) + float(raw[3])) / 2.0
+            except (TypeError, ValueError):
+                return
+        if bx is None or by is None:
+            return
+        ox, oy = float(self.origin[0]), float(self.origin[1])
+        span = 0.0
+        if raw and len(raw) == 4:
+            try:
+                span = max(float(raw[1]) - float(raw[0]), float(raw[3]) - float(raw[2]))
+            except (TypeError, ValueError):
+                span = 0.0
+        at_zero = abs(ox) < 1e-9 and abs(oy) < 1e-9
+        far = span > 0 and math.hypot(ox - bx, oy - by) > 0.25 * span
+        if at_zero or far:
+            ox, oy = bx, by
+        self.origin = (ox, oy)
 
     def _make_brush_surfaces(self) -> None:
         """Create/resize overlay surfaces for brush and erase; black fill, colorkey black for transparency."""
@@ -780,6 +831,7 @@ class MapViewer:
     def _save(self, path_prefix: str) -> None:
         """Write map image (composed) and JSON (obstacles, drivable with exteriors/interiors, goals, path). erase_polygons not persisted (cuts are baked into terrain)."""
         meta = dict(self.metadata)
+        meta["origin"] = [float(self.origin[0]), float(self.origin[1])]
         meta["scale"] = self.scale_x
         meta["scale_x"] = self.scale_x
         meta["scale_y"] = self.scale_y
