@@ -1,0 +1,14 @@
+{
+  "capture": {
+    "mode": "aabb",
+    "bounds": [-720, 210, -350, 750],
+    "ortho_width": 2000,
+    "ortho_height": 2000,
+    "camera_z_offset": null
+  },
+  "pose": {
+    "pose_swap_xy": true,
+    "pose_pixel_flip_y": false,
+    "pose_yaw_offset_deg": 0
+  }
+}

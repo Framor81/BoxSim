@@ -51,9 +51,8 @@ GOAL_RADIUS = 10
 COORD_TICK_INTERVAL = 200
 GRID_LABEL_PAD_X = 6
 GRID_LABEL_PAD_Y = 6
-# World extent for axis/grid (UE corners (-720,-350)–(210,750); same as builders.DEFAULT_CAPTURE_WORLD_BOUNDS).
-WORLD_GRID_X_MIN, WORLD_GRID_X_MAX = -720, 210
-WORLD_GRID_Y_MIN, WORLD_GRID_Y_MAX = -350, 750
+# When map.json has no world_bounds / capture_world_bounds / ortho, grid ticks use this symmetric range.
+GRID_EXTENT_FALLBACK = (-1000.0, 1000.0, -1000.0, 1000.0)
 SIDEBAR_WIDTH = 92
 
 
@@ -197,7 +196,11 @@ class MapViewer:
         self.world_width = world_width or self.metadata.get("ortho_width", 4000)
         self.world_height = world_height or self.metadata.get("world_height") or self.world_width
         self.origin = tuple(self.metadata.get("origin", [0, 0]))
-        self.scale = self.metadata.get("scale", 0.2)
+        _sx = float(self.metadata.get("scale_x", self.metadata.get("scale", 0.2)))
+        _sy = float(self.metadata.get("scale_y", _sx))
+        self.scale_x = _sx
+        self.scale_y = _sy
+        self.scale = _sx
         self.obstacles = self._load_terrain_polys(self.metadata.get("obstacles", []))
         self.drivable = self._load_terrain_polys(self.metadata.get("drivable", []))
         loaded_erase = self._load_erase_polygons(self.metadata.get("erase_polygons", []))
@@ -270,9 +273,34 @@ class MapViewer:
             wy,
             self.origin[0],
             self.origin[1],
-            self.scale,
+            self.scale_x,
             flip_y=self._pose_pixel_flip_y,
+            scale_y=self.scale_y,
         )
+
+    def _grid_world_extent(self) -> tuple[float, float, float, float]:
+        """xmin,xmax,ymin,ymax in world units for axis ticks."""
+        raw = self.metadata.get("capture_world_bounds") or self.metadata.get("world_bounds")
+        if raw is not None and len(raw) == 4:
+            try:
+                a, b, c, d = (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+                if b > a and d > c:
+                    return (a, b, c, d)
+            except (TypeError, ValueError):
+                pass
+        ow = float(self.metadata.get("ortho_width", 0.0) or 0.0)
+        oh = float(
+            self.metadata.get("ortho_height")
+            or self.metadata.get("world_height")
+            or ow
+            or 0.0
+        )
+        if ow <= 0 or oh <= 0:
+            ox, oy = float(self.origin[0]), float(self.origin[1])
+            fb = GRID_EXTENT_FALLBACK
+            return (ox + fb[0], ox + fb[1], oy + fb[2], oy + fb[3])
+        ox, oy = float(self.origin[0]), float(self.origin[1])
+        return (ox - ow / 2.0, ox + ow / 2.0, oy - oh / 2.0, oy + oh / 2.0)
 
     def _draw_world_coord_grid(self, surface: pygame.Surface, *, overlay: bool) -> None:
         """World-space grid; origin + scale match metadata (image center = origin in UE). overlay: semi-transparent."""
@@ -287,26 +315,28 @@ class MapViewer:
             c_label = GRID_OVERLAY_LABEL
         else:
             c_grid, c_axis, c_label = COLOR_GRID, COLOR_AXIS, COLOR_AXIS
-        wx = WORLD_GRID_X_MIN
-        while wx <= WORLD_GRID_X_MAX:
+        gx0, gx1, gy0, gy1 = self._grid_world_extent()
+        wx = gx0
+        while wx <= gx1:
             mx, _ = self._world_to_map_pixel(wx, oy)
             px, _ = self._map_pixel_to_screen(mx, 0.0)
             if -20 <= px < self.width + 20:
-                w = 2 if wx == 0 else 1
-                col = c_axis if wx == 0 else c_grid
+                w = 2 if abs(wx) < 1e-9 else 1
+                col = c_axis if abs(wx) < 1e-9 else c_grid
                 pygame.draw.line(surface, col, (int(px), 0), (int(px), self.height), w)
-                t = self._font.render(str(wx), True, c_label)
+                t = self._font.render(str(int(wx)) if wx == int(wx) else str(round(wx, 2)), True, c_label)
                 surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + pad_y))
             wx += step
-        world_y = WORLD_GRID_Y_MIN
-        while world_y <= WORLD_GRID_Y_MAX:
+        world_y = gy0
+        while world_y <= gy1:
             _, my = self._world_to_map_pixel(ox, world_y)
             _, py = self._map_pixel_to_screen(0.0, my)
             if -20 <= py < self.height + 20:
-                w = 2 if world_y == 0 else 1
-                col = c_axis if world_y == 0 else c_grid
+                w = 2 if abs(world_y) < 1e-9 else 1
+                col = c_axis if abs(world_y) < 1e-9 else c_grid
                 pygame.draw.line(surface, col, (0, int(py)), (self.width, int(py)), w)
-                t = self._font.render(str(-world_y), True, c_label)
+                lab = str(int(world_y)) if world_y == int(world_y) else str(round(world_y, 2))
+                t = self._font.render(lab, True, c_label)
                 surface.blit(t, (int(vc[0]) - t.get_width() - pad_x, int(py) - t.get_height() // 2))
             world_y += step
 
@@ -698,8 +728,9 @@ class MapViewer:
                 wy,
                 self.origin[0],
                 self.origin[1],
-                self.scale,
+                self.scale_x,
                 flip_y=self._pose_pixel_flip_y,
+                scale_y=self.scale_y,
             )
             sx, sy = self._map_pixel_to_screen(px_off, py_off)
             yaw_rad = _robot_display_yaw_rad(yaw, self._pose_yaw_offset_deg, self._pose_swap_xy)
@@ -749,6 +780,9 @@ class MapViewer:
     def _save(self, path_prefix: str) -> None:
         """Write map image (composed) and JSON (obstacles, drivable with exteriors/interiors, goals, path). erase_polygons not persisted (cuts are baked into terrain)."""
         meta = dict(self.metadata)
+        meta["scale"] = self.scale_x
+        meta["scale_x"] = self.scale_x
+        meta["scale_y"] = self.scale_y
         meta["pose_pixel_flip_y"] = self._pose_pixel_flip_y
         meta["pose_swap_xy"] = self._pose_swap_xy
         meta["pose_yaw_offset_deg"] = self._pose_yaw_offset_deg

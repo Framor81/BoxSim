@@ -14,9 +14,11 @@ def world_to_pixel(
     world_x: float, world_y: float,
     origin_x: float, origin_y: float,
     scale: float, flip_y: bool = True,
+    scale_y: float | None = None,
 ) -> tuple[float, float]:
+    sy = scale if scale_y is None else scale_y
     px = (world_x - origin_x) * scale
-    py = (world_y - origin_y) * scale
+    py = (world_y - origin_y) * sy
     if flip_y:
         py = -py
     return (px, py)
@@ -26,16 +28,27 @@ def pixel_to_world(
     pixel_x: float, pixel_y: float,
     origin_x: float, origin_y: float,
     scale: float, flip_y: bool = True,
+    scale_y: float | None = None,
 ) -> tuple[float, float]:
+    sy = scale if scale_y is None else scale_y
     if flip_y:
         pixel_y = -pixel_y
-    return (pixel_x / scale + origin_x, pixel_y / scale + origin_y)
+    return (pixel_x / scale + origin_x, pixel_y / sy + origin_y)
 
 
 def scale_from_ortho_width(ortho_width: float, image_width: int) -> float:
     if ortho_width <= 0:
         return 1.0
     return image_width / ortho_width
+
+
+def scales_from_ortho(
+    ortho_width: float, ortho_height: float, native_width: int, native_height: int
+) -> tuple[float, float]:
+    """Native pixels per world unit along image X and Y for axis-aligned ortho."""
+    sx = native_width / ortho_width if ortho_width > 0 else 1.0
+    sy = native_height / ortho_height if ortho_height > 0 else 1.0
+    return (sx, sy)
 
 
 def load_map(path_prefix: str | Path) -> tuple[np.ndarray, dict[str, Any]]:

@@ -23,6 +23,9 @@ build/
 # data/screenshots/*.png
 # data/maps/*.png
 
+# Local capture/framing (copy from boxsim.example.json)
+config/boxsim.json
+
 # OS
 .DS_Store
 Thumbs.db

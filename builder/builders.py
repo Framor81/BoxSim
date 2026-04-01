@@ -10,27 +10,27 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from map_utils import scale_from_ortho_width
+from map_utils import scales_from_ortho
+from .capture_config import (
+    capture_camera_z_from_config,
+    capture_ortho_from_config,
+    load_boxsim_config,
+    pose_meta_from_config,
+    resolve_capture_bounds,
+)
 from .viewer import MapViewer
 
 if TYPE_CHECKING:
     from agent import UnrealAgent
 
-# Z offset above pawn for the lit camera (world units along UE Z).
-DEFAULT_CAMERA_HEIGHT = 500
-# Default ortho span when not using world bounds (should match DEFAULT_CAPTURE_WORLD_BOUNDS if possible).
-DEFAULT_ORTHO_WIDTH = 930.0
-DEFAULT_ORTHO_HEIGHT = 1100.0
+# Fallback Z offset above pawn when config has no camera_z_offset (ortho framing is ortho_width/height, not Z).
+DEFAULT_CAMERA_HEIGHT = 500.0
+# Fallback ortho spans only if config file is missing (see config/boxsim.example.json).
+DEFAULT_ORTHO_WIDTH = 2000.0
+DEFAULT_ORTHO_HEIGHT = 2000.0
 
-# Axis-aligned capture region in UE XY (same as level corners (-720,-350)–(210,750)). Used when
-# BOXSIM_CAPTURE_WORLD_BOUNDS is unset. Set BOXSIM_CAPTURE_USE_PAWN_XY=1 to center on pawn instead.
-DEFAULT_CAPTURE_WORLD_BOUNDS = (-720.0, 210.0, -350.0, 750.0)
-
-# UE ortho ↔ pygame alignment (see _capture_topdown):
-# - The lit image center corresponds to world (cx, cy) where we place the camera; that pair is stored as
-#   metadata "origin" so grid + robot overlay use the same frame as the screenshot.
-# - scale = capture_native_width / ortho_width (meters-or-UU per pixel along image X).
-# - BOXSIM_CAPTURE_WORLD_BOUNDS=xmin,xmax,ymin,ymax overrides the default rectangle. Skewed views need affine UV↔world (not implemented).
+# Capture framing and pose defaults: config/boxsim.json or config/boxsim.example.json; override with BOXSIM_* env vars.
+# Image center world XY is stored as metadata "origin"; scale_x/y = native_size / ortho span per axis.
 
 # Lit captures come from your scene sensor (e.g. FusionCamSensor), not camera 0 (pawn/view target).
 # Use vget /cameras → pick a non-zero id, or set BOXSIM_UNREALCV_CAMERA_ID=1 (etc.).
@@ -47,25 +47,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _screenshot_rotation_string() -> str:
     return os.environ.get("BOXSIM_SCREENSHOT_CAMERA_ROTATION", SCREENSHOT_CAMERA_ROTATION).strip()
-
-
-def _parse_capture_world_bounds() -> tuple[float, float, float, float] | None:
-    """UE AABB xmin,xmax,ymin,ymax. Env overrides; else DEFAULT_CAPTURE_WORLD_BOUNDS unless BOXSIM_CAPTURE_USE_PAWN_XY."""
-    raw = os.environ.get("BOXSIM_CAPTURE_WORLD_BOUNDS", "").strip()
-    if raw:
-        parts = [p.strip() for p in raw.split(",")]
-        if len(parts) != 4:
-            return None
-        try:
-            xmin, xmax, ymin, ymax = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-        except ValueError:
-            return None
-        if xmax <= xmin or ymax <= ymin:
-            return None
-        return (xmin, xmax, ymin, ymax)
-    if _env_bool("BOXSIM_CAPTURE_USE_PAWN_XY", False):
-        return None
-    return DEFAULT_CAPTURE_WORLD_BOUNDS
 
 
 def _resolve_capture_camera_position(
@@ -239,17 +220,20 @@ class ScreenshotMapBuilder:
         self,
         *,
         screenshot_path: str | Path = "data/screenshots/topdown.png",
-        camera_height: float = DEFAULT_CAMERA_HEIGHT,
-        ortho_width: float = DEFAULT_ORTHO_WIDTH,
-        ortho_height: float = DEFAULT_ORTHO_HEIGHT,
+        camera_height: float | None = None,
+        ortho_width: float | None = None,
+        ortho_height: float | None = None,
         viewer_width: int = 1024,
         viewer_height: int = 768,
         save_path_prefix: str = "data/maps/map",
     ) -> None:
         self.screenshot_path = Path(screenshot_path)
-        self.camera_height = camera_height
-        self.ortho_width = ortho_width
-        self.ortho_height = ortho_height
+        self._cfg = load_boxsim_config()
+        cz = capture_camera_z_from_config(self._cfg, DEFAULT_CAMERA_HEIGHT)
+        self.camera_height = float(camera_height) if camera_height is not None else cz
+        cw, ch = capture_ortho_from_config(self._cfg)
+        self.ortho_width = float(ortho_width) if ortho_width is not None else cw
+        self.ortho_height = float(ortho_height) if ortho_height is not None else ch
         self.viewer_width = viewer_width
         self.viewer_height = viewer_height
         self.save_path_prefix = save_path_prefix
@@ -304,7 +288,7 @@ class ScreenshotMapBuilder:
                 resp = client.request(cmd)
                 debug[f"vset_{label}"] = repr(resp)
 
-            bounds = _parse_capture_world_bounds()
+            bounds = resolve_capture_bounds(self._cfg)
             if bounds is not None:
                 xmin, xmax, ymin, ymax = bounds
                 cx = (xmin + xmax) / 2.0
@@ -313,16 +297,15 @@ class ScreenshotMapBuilder:
                 capture_ortho_h = ymax - ymin
                 _, _, cz = _resolve_capture_camera_position(agent, float(self.camera_height), debug)
                 debug["capture_world_bounds"] = bounds
-                debug["capture_xy_source"] = (
-                    "BOXSIM_CAPTURE_WORLD_BOUNDS (env)"
-                    if os.environ.get("BOXSIM_CAPTURE_WORLD_BOUNDS", "").strip()
-                    else "DEFAULT_CAPTURE_WORLD_BOUNDS"
-                )
+                if os.environ.get("BOXSIM_CAPTURE_WORLD_BOUNDS", "").strip():
+                    debug["capture_xy_source"] = "BOXSIM_CAPTURE_WORLD_BOUNDS env"
+                else:
+                    debug["capture_xy_source"] = "config capture.mode=aabb"
             else:
                 cx, cy, cz = _resolve_capture_camera_position(agent, float(self.camera_height), debug)
                 capture_ortho_w = float(self.ortho_width)
                 capture_ortho_h = float(self.ortho_height)
-                debug["capture_xy_source"] = "pawn / default camera XY"
+                debug["capture_xy_source"] = "pawn_xy / config ortho"
 
             rot_str = _screenshot_rotation_string()
             debug["capture_camera_id"] = cam_id
@@ -386,21 +369,21 @@ class ScreenshotMapBuilder:
             if used != path:
                 cv2.imwrite(str(path), img)
             native_h, native_w = img.shape[0], img.shape[1]
+            sx, sy = scales_from_ortho(capture_ortho_w, float(oh_used), native_w, native_h)
             meta = {
                 "origin": [float(cx), float(cy)],
-                "scale": scale_from_ortho_width(capture_ortho_w, native_w),
+                "scale": float(sx),
+                "scale_x": float(sx),
+                "scale_y": float(sy),
                 "ortho_width": float(capture_ortho_w),
                 "ortho_height": float(oh_used),
-                # Pose math is in native lit-image pixels; viewer scales bg to window — must scale offsets too.
                 "capture_native_width": int(native_w),
                 "capture_native_height": int(native_h),
-                # Robot overlay vs ortho bitmap: UE X↔Y swap (camera / map axes); Y flip; optional yaw offset in viewer
-                "pose_pixel_flip_y": False,
-                "pose_swap_xy": True,
-                "pose_yaw_offset_deg": 0.0,
+                **pose_meta_from_config(self._cfg),
             }
             if bounds is not None:
                 meta["capture_world_bounds"] = [bounds[0], bounds[1], bounds[2], bounds[3]]
+                meta["world_bounds"] = meta["capture_world_bounds"]
             if _debug_screenshot():
                 print("[BOXSIM_DEBUG_SCREENSHOT] ok, loaded from", used, "wrote", path)
             return (str(path), meta)
@@ -413,25 +396,34 @@ class ManualMapBuilder:
     def __init__(
         self,
         *,
-        world_width: float = DEFAULT_ORTHO_WIDTH,
-        world_height: float = DEFAULT_ORTHO_HEIGHT,
+        world_width: float | None = None,
+        world_height: float | None = None,
         viewer_width: int = 1024,
         viewer_height: int = 768,
         save_path_prefix: str = "data/maps/manual_map",
     ) -> None:
-        self.world_width = world_width
-        self.world_height = world_height
+        self._cfg = load_boxsim_config()
+        cw, ch = capture_ortho_from_config(self._cfg)
+        self.world_width = float(world_width) if world_width is not None else cw
+        self.world_height = float(world_height) if world_height is not None else ch
         self.viewer_width = viewer_width
         self.viewer_height = viewer_height
         self.save_path_prefix = save_path_prefix
 
     def run(self, agent: "UnrealAgent | None" = None) -> None:
-        scale = self.viewer_width / self.world_width
+        scale_x = self.viewer_width / self.world_width
+        scale_y = self.viewer_height / self.world_height
+        half_w, half_h = self.world_width / 2.0, self.world_height / 2.0
         metadata = {
-            "origin": [0, 0],
-            "scale": scale,
+            "origin": [0.0, 0.0],
+            "scale": scale_x,
+            "scale_x": scale_x,
+            "scale_y": scale_y,
             "ortho_width": self.world_width,
+            "ortho_height": self.world_height,
             "world_height": self.world_height,
+            "world_bounds": [-half_w, half_w, -half_h, half_h],
+            **pose_meta_from_config(self._cfg),
         }
         def pose_getter():
             if agent is None or not agent.is_connected():

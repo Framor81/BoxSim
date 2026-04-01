@@ -6,6 +6,38 @@ Unreal Engine 5 + UnrealCV: pose, drive, map building.
 pip install -r requirements.txt
 ```
 
+**Capture config (framing and pose)**  
+When `config/boxsim.json` is missing, [config/boxsim.example.json](config/boxsim.example.json) is used. It frames a fixed UE **AABB** from corners **(-720, -350)**, **(-720, 750)**, **(210, 750)**, **(210, -350)** — i.e. **[xmin, xmax, ymin, ymax] = [-720, 210, -350, 750]**, world size **930 × 1100**, center **(-255, 200)**. Copy to `config/boxsim.json` (gitignored) or set `BOXSIM_CONFIG` to change it. Use **`capture.mode": "pawn_xy"`** if you want the view centered on the pawn with ortho from `ortho_width` / `ortho_height` instead.
+
+- **`capture.mode`**: `pawn_xy` centers the ortho camera on the pawn (same XY) and uses `ortho_width` / `ortho_height` for how much world fits in the shot. `aabb` uses `capture.bounds` as `[xmin, xmax, ymin, ymax]` in UE world XY: camera looks at the box center and ortho spans match that rectangle.
+- **`capture.camera_z_offset`**: height of the virtual lit camera above the pawn Z. For an **orthographic** top-down shot this does **not** change zoom; it only shifts along the view axis. **Zoom / field of view** is **`ortho_width` and `ortho_height`** (and UE/sensor aspect).
+- **`pose`**: `pose_swap_xy`, `pose_pixel_flip_y`, `pose_yaw_offset_deg` are written into map metadata so the pygame robot overlay matches your UE axes.
+
+Env overrides (when set) win over the file: `BOXSIM_CAPTURE_WORLD_BOUNDS`, `BOXSIM_CAPTURE_USE_PAWN_XY`, `BOXSIM_ORTHO_WIDTH`, `BOXSIM_ORTHO_HEIGHT`, `BOXSIM_CAMERA_Z_OFFSET`, `BOXSIM_POSE_*`, etc. See [builder/capture_config.py](builder/capture_config.py).
+
+Fixed world rectangle (four UE corners as min/max), in `config/boxsim.json`:
+
+```json
+{
+  "capture": {
+    "mode": "aabb",
+    "bounds": [-720, 210, -350, 750],
+    "ortho_width": 2000,
+    "ortho_height": 2000
+  },
+  "pose": {
+    "pose_swap_xy": true,
+    "pose_pixel_flip_y": false,
+    "pose_yaw_offset_deg": 0
+  }
+}
+```
+
+With `aabb`, `ortho_width`/`ortho_height` in the file are ignored for the Unreal `vset` (spans come from `bounds`); they still inform defaults if you switch back to `pawn_xy`.
+
+**World coordinates on the map**  
+After a screenshot capture, `map.json` stores `origin` (world XY at the **center** of the image), `scale_x` / `scale_y` (native pixels per world unit along image X and Y), and optional `capture_world_bounds` / `world_bounds`. Native-lit offsets use `world_to_pixel` in [map_utils.py](map_utils.py); the viewer scales from native resolution to the pygame window. Older maps with only `scale` still load (`scale_y` defaults to `scale`).
+
 **Features**
 - **Pose** — Poll pawn location (X, Y) and yaw at 5 Hz from Unreal.
 - **Drive** — Run a sequence of W/A/S/D key presses (declare in `drive.py` PATH); keys sent to Unreal via UnrealCV.
@@ -28,6 +60,6 @@ Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not disp
 
 For screenshot capture with FusionCamSensor (custom UnrealCV), lit uses a **non-zero** camera id — set `BOXSIM_UNREALCV_CAMERA_ID=1` if needed, or rely on `vget /cameras` (camera `0` is the pawn, not the lit sensor).
 
-Robot overlay: map coords use **native lit** pixels (`scale = capture_width / ortho_width`); `_map_pixel_to_screen` multiplies by `window / capture_native` so polys, grid, and robot stay aligned when the screenshot is stretched. With `pose_swap_xy`, heading uses `π/2 − yaw` so UE forward matches the swapped axes (tune with `pose_yaw_offset_deg` if still off). `capture_native_*`, `pose_*`, and optional `origin` in JSON as before.
+Robot overlay: map coords use **native lit** pixels (`scale_x` / `scale_y` from ortho spans and bitmap size); `_map_pixel_to_screen` multiplies by `window / capture_native` so polys, grid, and robot stay aligned when the screenshot is stretched. With `pose_swap_xy`, heading uses `π/2 − yaw` so UE forward matches the swapped axes (tune with `pose_yaw_offset_deg` if still off).
 
-Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid: center 0,0, range -500 to 500; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.
+Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid extent comes from `world_bounds` / `capture_world_bounds` or from `ortho_*` and `origin` in JSON; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.
