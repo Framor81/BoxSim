@@ -37,6 +37,9 @@ COLOR_PATH = (255, 220, 80)
 COLOR_ROBOT = (100, 180, 100)
 COLOR_ROBOT_OUTLINE = (60, 120, 60)
 COLOR_AXIS = (100, 100, 120)
+GRID_OVERLAY_GRID_ALPHA = 110
+GRID_OVERLAY_AXIS_ALPHA = 230
+GRID_OVERLAY_LABEL = (240, 242, 255)
 BRUSH_RADIUS = 8
 GRID_SIZE = 50
 POSE_POLL_INTERVAL = 0.2
@@ -47,39 +50,12 @@ COORD_TICK_INTERVAL = 100
 SIDEBAR_WIDTH = 92
 
 
-def _world_to_screen(
-    world_x: float,
-    world_y: float,
-    origin: tuple[float, float],
-    scale: float,
-    view_center: tuple[float, float],
-    *,
-    flip_y: bool = True,
-) -> tuple[float, float]:
-    """Map world → screen for robot overlay. flip_y must match how the base map treats world Y (Unreal lit PNG vs grid)."""
-    px, py = map_utils.world_to_pixel(world_x, world_y, origin[0], origin[1], scale, flip_y=flip_y)
-    return (view_center[0] + px, view_center[1] - py)
-
-
-def _robot_world_to_screen_scaled(
-    world_x: float,
-    world_y: float,
-    origin: tuple[float, float],
-    scale: float,
-    view_center_x: float,
-    view_center_y: float,
-    *,
-    flip_y: bool,
-    native_w: int,
-    native_h: int,
-    window_w: int,
-    window_h: int,
-) -> tuple[float, float]:
-    """World offset in native lit pixels (scale = native_w/ortho_width); stretch to pygame window like the background."""
-    px_off, py_off = map_utils.world_to_pixel(world_x, world_y, origin[0], origin[1], scale, flip_y=flip_y)
-    sx = view_center_x + px_off * window_w / native_w
-    sy = view_center_y - py_off * window_h / native_h
-    return (sx, sy)
+def _robot_display_yaw_rad(yaw_deg: float, offset_deg: float, pose_swap_xy: bool) -> float:
+    """UE yaw (Z, degrees) → radians for triangle nose. swap_xy: heading in UE XY matches map after (y,x) position swap."""
+    psi = math.radians(yaw_deg + offset_deg)
+    if pose_swap_xy:
+        return math.pi / 2 - psi
+    return psi + math.pi
 
 
 def _pose_pixel_flip_y_from_config(metadata: dict, has_background_image: bool) -> bool:
@@ -182,9 +158,8 @@ def _shapely_to_simple_polys(geom) -> list[list[tuple[float, float]]]:
 
 
 def _draw_robot_triangle(surface: pygame.Surface, center: tuple[float, float],
-                         yaw_deg: float, size: float = 12) -> None:
-    """Draw a small triangle for robot pose (nose in yaw direction) in screen coords."""
-    yaw_rad = math.radians(yaw_deg) + math.pi
+                         yaw_rad: float, size: float = 12) -> None:
+    """Draw a small triangle for robot pose (nose along yaw_rad) in screen coords."""
     nose = (center[0] + size * math.cos(yaw_rad), center[1] - size * math.sin(yaw_rad))
     back = yaw_rad + math.pi
     half = size * 0.6
@@ -242,6 +217,7 @@ class MapViewer:
         self.view_offset_x = self.view_offset_y = 0.0
         self._undo_history: list[dict] = []
         self._bg_surface: pygame.Surface | None = None
+        self._grid_overlay: pygame.Surface | None = None
 
         if background_image is not None:
             if background_image.ndim == 2:
@@ -260,6 +236,7 @@ class MapViewer:
         self._font = pygame.font.Font(None, 24)
         self._make_brush_surfaces()
         self._build_bg_surface()
+        self._build_grid_overlay()
         self.running = True
         self._pose_cache: tuple[float, float, float] | None = None
         self._pose_cache_time = 0.0
@@ -278,6 +255,36 @@ class MapViewer:
             s.fill((0, 0, 0))
             setattr(self, name, s)
 
+    def _draw_world_coord_grid(self, surface: pygame.Surface, *, overlay: bool) -> None:
+        """World-space grid in map pixels (same as manual mode). overlay=True: RGBA on SRCALPHA surface over screenshot."""
+        vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
+        lo, hi = -500, 500
+        step = COORD_TICK_INTERVAL
+        if overlay:
+            c_grid = (*COLOR_GRID, GRID_OVERLAY_GRID_ALPHA)
+            c_axis = (*COLOR_AXIS, GRID_OVERLAY_AXIS_ALPHA)
+            c_label = GRID_OVERLAY_LABEL
+        else:
+            c_grid, c_axis, c_label = COLOR_GRID, COLOR_AXIS, COLOR_AXIS
+        for wx in range(lo, hi + 1, step):
+            mx = wx * self.scale
+            px, _ = self._map_pixel_to_screen(mx, 0)
+            if -20 <= px < self.width + 20:
+                w = 2 if wx == 0 else 1
+                col = c_axis if wx == 0 else c_grid
+                pygame.draw.line(surface, col, (int(px), 0), (int(px), self.height), w)
+                t = self._font.render(str(wx), True, c_label)
+                surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + 4))
+        for wy in range(lo, hi + 1, step):
+            my = wy * self.scale
+            _, py = self._map_pixel_to_screen(0, my)
+            if -20 <= py < self.height + 20:
+                w = 2 if wy == 0 else 1
+                col = c_axis if wy == 0 else c_grid
+                pygame.draw.line(surface, col, (0, int(py)), (self.width, int(py)), w)
+                t = self._font.render(str(-wy), True, c_label)
+                surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
+
     def _build_bg_surface(self) -> None:
         """Build grid background (when no image): axes and ticks in map coords; used for hole fill and base."""
         if self.background is not None:
@@ -285,25 +292,16 @@ class MapViewer:
             return
         self._bg_surface = pygame.Surface((self.width, self.height))
         self._bg_surface.fill(COLOR_BG)
-        vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
-        lo, hi = -500, 500
-        step = COORD_TICK_INTERVAL
-        for wx in range(lo, hi + 1, step):
-            mx = wx * self.scale
-            px, _ = self._map_pixel_to_screen(mx, 0)
-            if -20 <= px < self.width + 20:
-                w = 2 if wx == 0 else 1
-                pygame.draw.line(self._bg_surface, COLOR_GRID if w == 1 else COLOR_AXIS, (int(px), 0), (int(px), self.height), w)
-                t = self._font.render(str(wx), True, COLOR_AXIS)
-                self._bg_surface.blit(t, (int(px) - t.get_width() // 2, int(vc[1]) + 4))
-        for wy in range(lo, hi + 1, step):
-            my = wy * self.scale
-            _, py = self._map_pixel_to_screen(0, my)
-            if -20 <= py < self.height + 20:
-                w = 2 if wy == 0 else 1
-                pygame.draw.line(self._bg_surface, COLOR_GRID if w == 1 else COLOR_AXIS, (0, int(py)), (self.width, int(py)), w)
-                t = self._font.render(str(-wy), True, COLOR_AXIS)
-                self._bg_surface.blit(t, (int(vc[0]) - t.get_width() - 4, int(py) - t.get_height() // 2))
+        self._draw_world_coord_grid(self._bg_surface, overlay=False)
+
+    def _build_grid_overlay(self) -> None:
+        """Semi-transparent grid + axis labels on top of screenshot (same world ticks as manual builder)."""
+        if self.background is None:
+            self._grid_overlay = None
+            return
+        self._grid_overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        self._grid_overlay.fill((0, 0, 0, 0))
+        self._draw_world_coord_grid(self._grid_overlay, overlay=True)
 
     def _draw_grid(self, surface: pygame.Surface) -> None:
         """Draw base layer: grid background or solid fill if no _bg_surface."""
@@ -312,16 +310,33 @@ class MapViewer:
         else:
             surface.fill(COLOR_BG)
 
+    def _map_window_scale_k(self) -> tuple[float, float]:
+        """Map coords are in native-lit space (world * scale); scale to pygame when screenshot is stretched to window."""
+        if (
+            self.background is not None
+            and self._capture_native_w > 0
+            and self._capture_native_h > 0
+        ):
+            return (
+                self.width / self._capture_native_w,
+                self.height / self._capture_native_h,
+            )
+        return (1.0, 1.0)
+
     def _screen_to_map_pixel(self, sx: float, sy: float) -> tuple[float, float]:
         """Screen (pixel) to map coords: origin at view_center + offset, Y flipped."""
-        mx = sx - self.view_center[0] - self.view_offset_x
-        my = -(sy - self.view_center[1] - self.view_offset_y)
+        kx, ky = self._map_window_scale_k()
+        mx = (sx - self.view_center[0] - self.view_offset_x) / kx
+        my = -(sy - self.view_center[1] - self.view_offset_y) / ky
         return (mx, my)
 
     def _map_pixel_to_screen(self, mx: float, my: float) -> tuple[float, float]:
         """Map coords to screen (pixel). Inverse of _screen_to_map_pixel."""
-        return (self.view_center[0] + mx + self.view_offset_x,
-                self.view_center[1] - my + self.view_offset_y)
+        kx, ky = self._map_window_scale_k()
+        return (
+            self.view_center[0] + mx * kx + self.view_offset_x,
+            self.view_center[1] - my * ky + self.view_offset_y,
+        )
 
     def _load_terrain_polys(self, raw: list) -> list[TerrainPoly]:
         """Load terrain from JSON: legacy list of [[x,y],...] or list of {exterior, interiors}. Skips <3 pts."""
@@ -549,6 +564,8 @@ class MapViewer:
         """Full frame: grid, drivable (with holes as BG), obstacles (with holes), hole-fill from base (excluding polygon interiors so draw-in-hole stays visible), brush overlays, preview, goals/path, robot, sidebar."""
         if self.background is not None:
             self.screen.blit(self.background, (0, 0))
+            if self._grid_overlay is not None:
+                self.screen.blit(self._grid_overlay, (0, 0))
         else:
             self._draw_grid(self.screen)
         for (ext, ints) in self.drivable:
@@ -650,32 +667,18 @@ class MapViewer:
         pose = self._pose_cache
         if pose is not None:
             x, y, yaw = pose
-            mx, my = (y, x) if self._pose_swap_xy else (x, y)
-            vcx = self.view_center[0] + self.view_offset_x
-            vcy = self.view_center[1] + self.view_offset_y
-            if (
-                self.background is not None
-                and self._capture_native_w > 0
-                and self._capture_native_h > 0
-            ):
-                sx, sy = _robot_world_to_screen_scaled(
-                    mx,
-                    my,
-                    self.origin,
-                    self.scale,
-                    vcx,
-                    vcy,
-                    flip_y=self._pose_pixel_flip_y,
-                    native_w=self._capture_native_w,
-                    native_h=self._capture_native_h,
-                    window_w=self.width,
-                    window_h=self.height,
-                )
-            else:
-                sx, sy = _world_to_screen(
-                    mx, my, self.origin, self.scale, (vcx, vcy), flip_y=self._pose_pixel_flip_y
-                )
-            _draw_robot_triangle(self.screen, (sx, sy), yaw + self._pose_yaw_offset_deg)
+            wx, wy = (y, x) if self._pose_swap_xy else (x, y)
+            px_off, py_off = map_utils.world_to_pixel(
+                wx,
+                wy,
+                self.origin[0],
+                self.origin[1],
+                self.scale,
+                flip_y=self._pose_pixel_flip_y,
+            )
+            sx, sy = self._map_pixel_to_screen(px_off, py_off)
+            yaw_rad = _robot_display_yaw_rad(yaw, self._pose_yaw_offset_deg, self._pose_swap_xy)
+            _draw_robot_triangle(self.screen, (sx, sy), yaw_rad)
         self._draw_tool_bar()
         pygame.display.flip()
 
@@ -755,6 +758,7 @@ class MapViewer:
                     self.view_center = (self.width // 2, self.height // 2)
                     self._make_brush_surfaces()
                     self._build_bg_surface()
+                    self._build_grid_overlay()
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         mx, my = self._screen_to_map_pixel(*event.pos)
