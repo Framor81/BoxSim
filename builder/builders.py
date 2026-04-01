@@ -24,6 +24,17 @@ from .viewer import MapViewer
 if TYPE_CHECKING:
     from agent import UnrealAgent
 
+
+def _normalize_lit_rotate_90(raw: object) -> str:
+    s = str(raw or "none").strip().lower()
+    if s in ("", "none", "0", "false", "no"):
+        return "none"
+    if s in ("cw", "clockwise", "90cw"):
+        return "cw"
+    if s in ("ccw", "counterclockwise", "anticlockwise", "90ccw"):
+        return "ccw"
+    return "none"
+
 # Fallback Z offset above pawn when config has no camera_z_offset (ortho framing is ortho_width/height, not Z).
 DEFAULT_CAMERA_HEIGHT = 500.0
 # Fallback ortho spans only if config file is missing (see config/boxsim.example.json).
@@ -377,21 +388,51 @@ class ScreenshotMapBuilder:
             if bool(cap_cfg.get("transpose_lit_image", False)):
                 img = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
                 debug["capture_transpose_lit_image"] = True
+            rot_norm = _normalize_lit_rotate_90(cap_cfg.get("lit_rotate_90"))
+            if rot_norm == "cw":
+                img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+            elif rot_norm == "ccw":
+                img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            debug["capture_lit_rotate_90"] = rot_norm
+            lit_flip_h = bool(cap_cfg.get("lit_flip_horizontal", False))
+            lit_flip_v = bool(cap_cfg.get("lit_flip_vertical", False))
+            if lit_flip_h:
+                img = cv2.flip(img, 1)
+            if lit_flip_v:
+                img = cv2.flip(img, 0)
+            debug["capture_lit_flip_horizontal"] = lit_flip_h
+            debug["capture_lit_flip_vertical"] = lit_flip_v
             native_h, native_w = img.shape[0], img.shape[1]
             cv2.imwrite(str(path), img)
-            sx, sy = scales_from_ortho(capture_ortho_w, float(oh_used), native_w, native_h)
+            lit_pixel_axes_transpose = rot_norm in ("cw", "ccw")
+            if lit_pixel_axes_transpose:
+                meta_ortho_w = float(oh_used)
+                meta_ortho_h = float(capture_ortho_w)
+            else:
+                meta_ortho_w = float(capture_ortho_w)
+                meta_ortho_h = float(oh_used)
+            sx, sy = scales_from_ortho(meta_ortho_w, meta_ortho_h, native_w, native_h)
+            disp = map_display_meta_from_config(self._cfg)
+            if lit_flip_h:
+                disp["map_mirror_x"] = True
+            if lit_flip_v:
+                disp["map_mirror_y"] = True
             meta = {
                 "origin": [float(cx), float(cy)],
                 "scale": float(sx),
                 "scale_x": float(sx),
                 "scale_y": float(sy),
-                "ortho_width": float(capture_ortho_w),
-                "ortho_height": float(oh_used),
+                "ortho_width": meta_ortho_w,
+                "ortho_height": meta_ortho_h,
                 "capture_native_width": int(native_w),
                 "capture_native_height": int(native_h),
                 "capture_transpose_lit_image": bool(cap_cfg.get("transpose_lit_image", False)),
                 "capture_swap_ortho_width_height": bool(cap_cfg.get("swap_ortho_width_height", False)),
-                **map_display_meta_from_config(self._cfg),
+                "lit_rotate_90": rot_norm,
+                "lit_flip_horizontal": lit_flip_h,
+                "lit_flip_vertical": lit_flip_v,
+                "lit_pixel_axes_transpose": lit_pixel_axes_transpose,
+                **disp,
             }
             if bounds is not None:
                 meta["capture_world_bounds"] = [bounds[0], bounds[1], bounds[2], bounds[3]]

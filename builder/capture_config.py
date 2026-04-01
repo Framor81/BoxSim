@@ -20,6 +20,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "camera_z_offset": None,
         "swap_ortho_width_height": False,
         "transpose_lit_image": False,
+        "lit_rotate_90": "none",
+        "lit_flip_horizontal": False,
+        "lit_flip_vertical": False,
         "origin_world_adjust": [0.0, 0.0],
     },
     "pose": {
@@ -123,6 +126,19 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
         cap["transpose_lit_image"] = True
     if _env_bool("BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT"):
         cap["swap_ortho_width_height"] = True
+
+    lr = os.environ.get("BOXSIM_LIT_ROTATE_90", "").strip().lower()
+    if lr in ("cw", "clockwise", "ccw", "counterclockwise", "anticlockwise", "none", "0", "false"):
+        if lr in ("none", "0", "false"):
+            cap["lit_rotate_90"] = "none"
+        elif lr in ("ccw", "counterclockwise", "anticlockwise"):
+            cap["lit_rotate_90"] = "ccw"
+        else:
+            cap["lit_rotate_90"] = "cw"
+    if _env_bool("BOXSIM_LIT_FLIP_HORIZONTAL"):
+        cap["lit_flip_horizontal"] = True
+    if _env_bool("BOXSIM_LIT_FLIP_VERTICAL"):
+        cap["lit_flip_vertical"] = True
 
     if _env_bool("BOXSIM_MAP_MIRROR_X"):
         pose["map_mirror_x"] = True

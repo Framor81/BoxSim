@@ -255,6 +255,9 @@ class MapViewer:
         has_bg = self.background is not None
         self._pose_pixel_flip_y = _pose_pixel_flip_y_from_config(self.metadata, has_bg)
         self._pose_swap_xy = _pose_swap_xy_from_config(self.metadata, has_bg)
+        self._swap_world_xy_for_map = self._pose_swap_xy or bool(
+            self.metadata.get("lit_pixel_axes_transpose", False)
+        )
         self._pose_yaw_offset_deg = _pose_yaw_offset_deg_from_config(self.metadata)
         self._make_brush_surfaces()
         self._build_bg_surface()
@@ -321,6 +324,8 @@ class MapViewer:
 
     def _world_to_map_pixel(self, wx: float, wy: float) -> tuple[float, float]:
         """Map-space offsets (native-lit pixels, Y per pose_pixel_flip_y) — same frame as robot overlay."""
+        if self._swap_world_xy_for_map:
+            wx, wy = wy, wx
         return map_utils.world_to_pixel(
             wx,
             wy,
@@ -783,18 +788,9 @@ class MapViewer:
         pose = self._pose_cache
         if pose is not None:
             x, y, yaw = pose
-            wx, wy = (y, x) if self._pose_swap_xy else (x, y)
-            px_off, py_off = map_utils.world_to_pixel(
-                wx,
-                wy,
-                self.origin[0],
-                self.origin[1],
-                self.scale_x,
-                flip_y=self._pose_pixel_flip_y,
-                scale_y=self.scale_y,
-            )
+            px_off, py_off = self._world_to_map_pixel(x, y)
             sx, sy = self._map_pixel_to_screen(px_off, py_off)
-            yaw_rad = _robot_display_yaw_rad(yaw, self._pose_yaw_offset_deg, self._pose_swap_xy)
+            yaw_rad = _robot_display_yaw_rad(yaw, self._pose_yaw_offset_deg, self._swap_world_xy_for_map)
             _draw_robot_triangle(self.screen, (sx, sy), yaw_rad)
         self._draw_tool_bar()
         pygame.display.flip()
@@ -847,6 +843,7 @@ class MapViewer:
         meta["scale_y"] = self.scale_y
         meta["pose_pixel_flip_y"] = self._pose_pixel_flip_y
         meta["pose_swap_xy"] = self._pose_swap_xy
+        meta["lit_pixel_axes_transpose"] = bool(self.metadata.get("lit_pixel_axes_transpose", False))
         meta["pose_yaw_offset_deg"] = self._pose_yaw_offset_deg
         meta["map_mirror_x"] = self._map_mirror_x
         meta["map_mirror_y"] = self._map_mirror_y

@@ -11,15 +11,17 @@ When `config/boxsim.json` is missing, [config/boxsim.example.json](config/boxsim
 
 - **`capture.mode`**: `pawn_xy` centers the ortho camera on the pawn (same XY) and uses `ortho_width` / `ortho_height` for how much world fits in the shot. `aabb` uses `capture.bounds` as `[xmin, xmax, ymin, ymax]` in UE world XY: camera looks at the box center and ortho spans match that rectangle.
 - **`capture.camera_z_offset`**: height of the virtual lit camera above the pawn Z. For an **orthographic** top-down shot this does **not** change zoom; it only shifts along the view axis. **Zoom / field of view** is **`ortho_width` and `ortho_height`** (and UE/sensor aspect).
+- **`capture.lit_rotate_90`**: **`none`**, **`cw`**, or **`ccw`** — rotates the **saved lit PNG** 90° after optional `transpose_lit_image`. Sets **`lit_pixel_axes_transpose`** in `map.json` so world↔grid math matches the bitmap (same effect as **`pose_swap_xy`** for alignment, without toggling pose by hand). **`ortho_width` / `ortho_height`** in metadata are swapped when rotating so scales stay correct.
+- **`capture.lit_flip_horizontal` / `lit_flip_vertical`**: flip the lit image before save; **`map_mirror_x` / `map_mirror_y`** in metadata are forced **on** for the matching axis so pygame drawing stays consistent (e.g. **+UE X ↔ −map X** via horizontal flip + mirror).
 - **`pose`**: Written into map metadata for the robot overlay:
-  - **`pose_swap_xy`**: when **true**, pawn **UE Y** drives **horizontal** pygame motion (+UE **Y** → +screen **X**), and UE **X** drives vertical — matches many top-down UE5 shots.
-  - **`pose_yaw_offset_deg`**: adds to Unreal yaw before drawing the triangle (try **90** or **-90** if forward points wrong).
-  - **`map_mirror_x` / `map_mirror_y`**: flip map ↔ screen along one axis if a world direction still moves backward in pygame.
+  - **`pose_swap_xy`**: when **true**, pawn **UE Y** drives **horizontal** map-pixel motion and UE **X** vertical — usually leave **false** if you use **`lit_rotate_90`** (metadata then carries **`lit_pixel_axes_transpose`**). You can still enable this for manual maps or legacy PNGs without re-capture.
+  - **`pose_yaw_offset_deg`**: adds to Unreal yaw before drawing the triangle (try **90** or **-90** if forward points wrong after rotation).
+  - **`map_mirror_x` / `map_mirror_y`**: flip map ↔ screen; can be combined with capture flips (capture flips merge via OR into the saved metadata).
   - **`pose_pixel_flip_y`**: vertical flip in map-pixel space (screenshot vs manual).
 
 Env overrides (when set) win over the file: `BOXSIM_CAPTURE_WORLD_BOUNDS`, `BOXSIM_CAPTURE_USE_PAWN_XY`, `BOXSIM_ORTHO_WIDTH`, `BOXSIM_ORTHO_HEIGHT`, `BOXSIM_CAMERA_Z_OFFSET`, `BOXSIM_POSE_*`, etc. See [builder/capture_config.py](builder/capture_config.py).
 
-**Agent / grid vs background drift** — The robot must use the **same** UE `(x, y)` as the grid labels. Keep **`pose_swap_xy": false`** unless your top-down image maps UE **X** to vertical and **Y** to horizontal on the bitmap. (Older builds defaulted swap on for screenshots and could place the pawn at `(y, x)` while the grid stayed in `(x, y)`.) If the **photo** still does not line up with the grid at a known landmark, try in order: **`capture.swap_ortho_width_height`** (`BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT=1`) if UE pairs ortho extents to the wrong image axis; **`capture.transpose_lit_image`** (`BOXSIM_TRANSPOSE_LIT_IMAGE=1`) if rows/columns vs world X/Y are swapped in the PNG; **`capture.origin_world_adjust": [dx, dy]`** (`BOXSIM_ORIGIN_WORLD_ADJUST=dx,dy`) to nudge the registered world center in small world units. **Recapture** after changing these so `map.json` matches the processed image.
+**Agent / grid vs background drift** — Prefer fixing the **bitmap** with **`capture.lit_rotate_90`** (`cw` / `ccw`) and **`lit_flip_horizontal` / `lit_flip_vertical`** so **+UE Y** matches vertical on screen and axes match your mental model; then set **`pose_swap_xy": false`** and recapture. If the **photo** still does not line up, try in order: **`capture.swap_ortho_width_height`** (`BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT=1`); **`capture.transpose_lit_image`** (`BOXSIM_TRANSPOSE_LIT_IMAGE=1`); **`pose_swap_xy`**; **`capture.origin_world_adjust": [dx, dy]`** (`BOXSIM_ORIGIN_WORLD_ADJUST=dx,dy`). **Recapture** after changing lit processing so `map.json` matches the PNG.
 
 Fixed world rectangle (four UE corners as min/max), in `config/boxsim.json`:
 
@@ -29,10 +31,12 @@ Fixed world rectangle (four UE corners as min/max), in `config/boxsim.json`:
     "mode": "aabb",
     "bounds": [-720, 210, -350, 750],
     "ortho_width": 2000,
-    "ortho_height": 2000
+    "ortho_height": 2000,
+    "lit_rotate_90": "cw",
+    "lit_flip_horizontal": true
   },
   "pose": {
-    "pose_swap_xy": true,
+    "pose_swap_xy": false,
     "pose_pixel_flip_y": false,
     "pose_yaw_offset_deg": 0
   }
@@ -68,6 +72,6 @@ Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not disp
 
 For screenshot capture with FusionCamSensor (custom UnrealCV), lit uses a **non-zero** camera id — set `BOXSIM_UNREALCV_CAMERA_ID=1` if needed, or rely on `vget /cameras` (camera `0` is the pawn, not the lit sensor).
 
-Robot overlay: map coords use **native lit** pixels (`scale_x` / `scale_y` from ortho spans and bitmap size); `_map_pixel_to_screen` multiplies by `window / capture_native` so polys, grid, and robot stay aligned when the screenshot is stretched. With `pose_swap_xy`, heading uses `π/2 − yaw` so UE forward matches the swapped axes (tune with `pose_yaw_offset_deg` if still off).
+Robot overlay: map coords use **native lit** pixels (`scale_x` / `scale_y` from ortho spans and bitmap size); `_map_pixel_to_screen` multiplies by `window / capture_native` so polys, grid, and robot stay aligned when the screenshot is stretched. With **`pose_swap_xy`** or **`lit_pixel_axes_transpose`** (from **`lit_rotate_90`**), heading uses `π/2 − yaw` so UE forward matches the swapped axes (tune with **`pose_yaw_offset_deg`** if still off).
 
 Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid extent comes from `world_bounds` / `capture_world_bounds` or from `ortho_*` and `origin` in JSON; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.
