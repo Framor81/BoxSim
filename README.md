@@ -23,6 +23,11 @@ pip install -r requirements.txt
 | `python build.py manual` | Blank canvas, draw obstacles |
 | `python build.py manual --unreal` | Same + connect to Unreal (robot overlay) |
 
+
 Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not display name).
+
+For screenshot capture with FusionCamSensor (custom UnrealCV), lit uses a **non-zero** camera id — set `BOXSIM_UNREALCV_CAMERA_ID=1` if needed, or rely on `vget /cameras` (camera `0` is the pawn, not the lit sensor).
+
+Robot overlay on screenshot: `capture_native_width` / `capture_native_height` (lit image size before scaling to the pygame window) fix pose **scale** vs the stretched background; plus `pose_pixel_flip_y`, `pose_swap_xy`, optional `pose_yaw_offset_deg`. Env overrides: `BOXSIM_POSE_*` as in prior note. Ortho framing assumes **world (0,0) at the center** of the lit capture (typical top-down on origin); if your camera targets another world point, set `origin` in JSON to that `[x,y]` so pose is relative to image center.
 
 Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid: center 0,0, range -500 to 500; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.

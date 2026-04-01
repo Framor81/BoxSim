@@ -20,6 +20,7 @@ class PawnPose(NamedTuple):
     x: float
     y: float
     yaw: float
+    z: float = 0.0
 
 
 class UnrealAgent:
@@ -135,7 +136,7 @@ class UnrealAgent:
         _log(f"  Parsed location: x={x} y={y} z={z}")
         _log(f"  Parsed rotation: pitch={pitch} yaw={yaw} roll={roll}")
         if x is not None and yaw is not None:
-            return PawnPose(x=x, y=y, yaw=yaw)
+            return PawnPose(x=x, y=y, yaw=yaw, z=z if z is not None else 0.0)
 
         # Fallback: vget /object/name/location and rotation
         _log("vbp failed or bad parse. Trying vget /object/name/...")
@@ -157,7 +158,7 @@ class UnrealAgent:
         if x is None or yaw is None:
             _log("Still no valid pose. Use OBJECT NAME (e.g. BP_MyPlayer_Pawn_C_1) for UNREALCV_PAWN, not display name.")
         else:
-            return PawnPose(x=x, y=y, yaw=yaw)
+            return PawnPose(x=x, y=y, yaw=yaw, z=z if z is not None else 0.0)
         return None
 
     @staticmethod
@@ -192,7 +193,7 @@ def run_pose_loop(agent: UnrealAgent, rate_hz: float = 5.0, *, debug: bool = Fal
         t0 = time.perf_counter()
         pose = agent.get_pawn_pose(debug=debug)
         if pose is not None:
-            print(f"pose x={pose.x:.2f} y={pose.y:.2f} yaw={pose.yaw:.2f}")
+            print(f"pose x={pose.x:.2f} y={pose.y:.2f} z={pose.z:.2f} yaw={pose.yaw:.2f}")
         else:
             print("pose (unavailable)")
             if hint_on_fail and not hint_printed:

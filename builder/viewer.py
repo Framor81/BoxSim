@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Callable
 
@@ -46,10 +47,79 @@ COORD_TICK_INTERVAL = 100
 SIDEBAR_WIDTH = 92
 
 
-def _world_to_screen(world_x: float, world_y: float, origin: tuple[float, float],
-                     scale: float, view_center: tuple[float, float]) -> tuple[float, float]:
-    px, py = map_utils.world_to_pixel(world_x, world_y, origin[0], origin[1], scale, flip_y=True)
+def _world_to_screen(
+    world_x: float,
+    world_y: float,
+    origin: tuple[float, float],
+    scale: float,
+    view_center: tuple[float, float],
+    *,
+    flip_y: bool = True,
+) -> tuple[float, float]:
+    """Map world → screen for robot overlay. flip_y must match how the base map treats world Y (Unreal lit PNG vs grid)."""
+    px, py = map_utils.world_to_pixel(world_x, world_y, origin[0], origin[1], scale, flip_y=flip_y)
     return (view_center[0] + px, view_center[1] - py)
+
+
+def _robot_world_to_screen_scaled(
+    world_x: float,
+    world_y: float,
+    origin: tuple[float, float],
+    scale: float,
+    view_center_x: float,
+    view_center_y: float,
+    *,
+    flip_y: bool,
+    native_w: int,
+    native_h: int,
+    window_w: int,
+    window_h: int,
+) -> tuple[float, float]:
+    """World offset in native lit pixels (scale = native_w/ortho_width); stretch to pygame window like the background."""
+    px_off, py_off = map_utils.world_to_pixel(world_x, world_y, origin[0], origin[1], scale, flip_y=flip_y)
+    sx = view_center_x + px_off * window_w / native_w
+    sy = view_center_y - py_off * window_h / native_h
+    return (sx, sy)
+
+
+def _pose_pixel_flip_y_from_config(metadata: dict, has_background_image: bool) -> bool:
+    """Robot overlay Y: True = negate world Y in pixel math (grid). False = match Unreal ortho screenshots (Y ~ image down)."""
+    v = os.environ.get("BOXSIM_POSE_PIXEL_FLIP_Y", "").strip().lower()
+    if v in ("1", "true", "yes"):
+        return True
+    if v in ("0", "false", "no"):
+        return False
+    if "pose_pixel_flip_y" in metadata:
+        return bool(metadata["pose_pixel_flip_y"])
+    return not has_background_image
+
+
+def _pose_swap_xy_from_config(metadata: dict, has_background_image: bool) -> bool:
+    """UE XY vs map: ortho shot is often rotated 90° — pawn +X in world should track map vertical (+map y / screen), not map horizontal."""
+    v = os.environ.get("BOXSIM_POSE_SWAP_XY", "").strip().lower()
+    if v in ("1", "true", "yes"):
+        return True
+    if v in ("0", "false", "no"):
+        return False
+    if "pose_swap_xy" in metadata:
+        return bool(metadata["pose_swap_xy"])
+    return bool(has_background_image)
+
+
+def _pose_yaw_offset_deg_from_config(metadata: dict) -> float:
+    raw = os.environ.get("BOXSIM_POSE_YAW_OFFSET_DEG", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    v = metadata.get("pose_yaw_offset_deg")
+    if v is not None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
 
 
 def _shapely_to_erase_polys(geom) -> list[ErasePoly]:
@@ -194,6 +264,11 @@ class MapViewer:
         self._pose_cache: tuple[float, float, float] | None = None
         self._pose_cache_time = 0.0
         self._save_flash_until = 0.0
+        self._pose_pixel_flip_y = _pose_pixel_flip_y_from_config(self.metadata, self.background is not None)
+        self._pose_swap_xy = _pose_swap_xy_from_config(self.metadata, self.background is not None)
+        self._pose_yaw_offset_deg = _pose_yaw_offset_deg_from_config(self.metadata)
+        self._capture_native_w = int(self.metadata.get("capture_native_width") or 0)
+        self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
 
     def _make_brush_surfaces(self) -> None:
         """Create/resize overlay surfaces for brush and erase; black fill, colorkey black for transparency."""
@@ -575,9 +650,32 @@ class MapViewer:
         pose = self._pose_cache
         if pose is not None:
             x, y, yaw = pose
-            vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
-            sx, sy = _world_to_screen(x, y, self.origin, self.scale, vc)
-            _draw_robot_triangle(self.screen, (sx, sy), yaw)
+            mx, my = (y, x) if self._pose_swap_xy else (x, y)
+            vcx = self.view_center[0] + self.view_offset_x
+            vcy = self.view_center[1] + self.view_offset_y
+            if (
+                self.background is not None
+                and self._capture_native_w > 0
+                and self._capture_native_h > 0
+            ):
+                sx, sy = _robot_world_to_screen_scaled(
+                    mx,
+                    my,
+                    self.origin,
+                    self.scale,
+                    vcx,
+                    vcy,
+                    flip_y=self._pose_pixel_flip_y,
+                    native_w=self._capture_native_w,
+                    native_h=self._capture_native_h,
+                    window_w=self.width,
+                    window_h=self.height,
+                )
+            else:
+                sx, sy = _world_to_screen(
+                    mx, my, self.origin, self.scale, (vcx, vcy), flip_y=self._pose_pixel_flip_y
+                )
+            _draw_robot_triangle(self.screen, (sx, sy), yaw + self._pose_yaw_offset_deg)
         self._draw_tool_bar()
         pygame.display.flip()
 
@@ -623,6 +721,12 @@ class MapViewer:
     def _save(self, path_prefix: str) -> None:
         """Write map image (composed) and JSON (obstacles, drivable with exteriors/interiors, goals, path). erase_polygons not persisted (cuts are baked into terrain)."""
         meta = dict(self.metadata)
+        meta["pose_pixel_flip_y"] = self._pose_pixel_flip_y
+        meta["pose_swap_xy"] = self._pose_swap_xy
+        meta["pose_yaw_offset_deg"] = self._pose_yaw_offset_deg
+        if self._capture_native_w > 0 and self._capture_native_h > 0:
+            meta["capture_native_width"] = self._capture_native_w
+            meta["capture_native_height"] = self._capture_native_h
         meta["goals"] = [[float(p[0]), float(p[1])] for p in self.goals]
         meta["path"] = [[float(p[0]), float(p[1])] for p in self.path]
         meta["obstacles"] = [
