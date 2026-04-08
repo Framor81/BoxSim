@@ -2,21 +2,24 @@
   "capture": {
     "mode": "aabb",
     "bounds": [-720, 210, -350, 750],
+    "bounds_padding": 200,
     "ortho_width": 2000,
     "ortho_height": 2000,
     "camera_z_offset": null,
+    "camera_rotation_add_deg": [0, 90, 0],
     "swap_ortho_width_height": false,
+    "apply_lit_image_transforms": false,
     "transpose_lit_image": false,
-    "lit_rotate_90": "cw",
-    "lit_flip_horizontal": true,
+    "lit_rotate_90": "none",
+    "lit_flip_horizontal": false,
     "lit_flip_vertical": false,
     "origin_world_adjust": [0, 0]
   },
   "pose": {
     "pose_swap_xy": false,
-    "pose_pixel_flip_y": false,
+    "pose_pixel_flip_y": true,
     "pose_yaw_offset_deg": 0,
-    "map_mirror_x": false,
-    "map_mirror_y": false
+    "map_mirror_x": true,
+    "map_mirror_y": true
   }
 }

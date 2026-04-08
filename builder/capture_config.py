@@ -18,17 +18,25 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "ortho_width": 2000.0,
         "ortho_height": 2000.0,
         "camera_z_offset": None,
+        # Added to base rotation (BOXSIM_SCREENSHOT_CAMERA_ROTATION), e.g. [0, 90, 0] = yaw +90° in Unreal before lit capture.
+        "camera_rotation_add_deg": [0.0, 90.0, 0.0],
         "swap_ortho_width_height": False,
+        # When false, the saved PNG is exactly what Unreal renders (no OpenCV transpose/rotate/flip).
+        "apply_lit_image_transforms": False,
         "transpose_lit_image": False,
         "lit_rotate_90": "none",
         "lit_flip_horizontal": False,
         "lit_flip_vertical": False,
         "origin_world_adjust": [0.0, 0.0],
+        # World units added on each side to capture.bounds in aabb mode (expands ortho frustum).
+        "bounds_padding": 200.0,
     },
     "pose": {
         "pose_swap_xy": False,
-        "pose_pixel_flip_y": False,
+        "pose_pixel_flip_y": True,
         "pose_yaw_offset_deg": 0.0,
+        "map_mirror_x": True,
+        "map_mirror_y": True,
     },
 }
 
@@ -89,6 +97,13 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
     if _env_bool("BOXSIM_CAPTURE_USE_PAWN_XY") and not raw_bounds:
         cap["mode"] = "pawn_xy"
 
+    bpad = os.environ.get("BOXSIM_BOUNDS_PADDING", "").strip()
+    if bpad:
+        try:
+            cap["bounds_padding"] = float(bpad)
+        except ValueError:
+            pass
+
     for key, envname in (
         ("ortho_width", "BOXSIM_ORTHO_WIDTH"),
         ("ortho_height", "BOXSIM_ORTHO_HEIGHT"),
@@ -127,6 +142,18 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
     if _env_bool("BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT"):
         cap["swap_ortho_width_height"] = True
 
+    if _env_bool("BOXSIM_APPLY_LIT_IMAGE_TRANSFORMS"):
+        cap["apply_lit_image_transforms"] = True
+
+    cra = os.environ.get("BOXSIM_CAMERA_ROTATION_ADD_DEG", "").strip()
+    if cra:
+        parts = [p.strip() for p in cra.split(",")]
+        if len(parts) >= 3:
+            try:
+                cap["camera_rotation_add_deg"] = [float(parts[0]), float(parts[1]), float(parts[2])]
+            except ValueError:
+                pass
+
     lr = os.environ.get("BOXSIM_LIT_ROTATE_90", "").strip().lower()
     if lr in ("cw", "clockwise", "ccw", "counterclockwise", "anticlockwise", "none", "0", "false"):
         if lr in ("none", "0", "false"):
@@ -155,8 +182,19 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
                 pass
 
 
+def capture_bounds_padding(cfg: dict[str, Any]) -> float:
+    """Extra world units to expand aabb bounds on each side (-X,+X,-Y,+Y) for ortho capture."""
+    cap = cfg.get("capture") or {}
+    raw = cap.get("bounds_padding", 200.0)
+    try:
+        p = float(raw)
+    except (TypeError, ValueError):
+        return 200.0
+    return max(0.0, p)
+
+
 def resolve_capture_bounds(cfg: dict[str, Any]) -> tuple[float, float, float, float] | None:
-    """UE AABB xmin,xmax,ymin,ymax for screenshot framing, or None for pawn-centered XY."""
+    """UE AABB xmin,xmax,ymin,ymax for screenshot framing (after bounds_padding), or None for pawn-centered XY."""
     cap = cfg.get("capture") or {}
     mode = str(cap.get("mode", "pawn_xy")).lower()
     bounds = cap.get("bounds")
@@ -166,6 +204,12 @@ def resolve_capture_bounds(cfg: dict[str, Any]) -> tuple[float, float, float, fl
         except (TypeError, ValueError):
             return None
         if xmax > xmin and ymax > ymin:
+            pad = capture_bounds_padding(cfg)
+            if pad > 0.0:
+                xmin -= pad
+                xmax += pad
+                ymin -= pad
+                ymax += pad
             return (xmin, xmax, ymin, ymax)
     return None
 
@@ -192,7 +236,7 @@ def pose_meta_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
     pose = cfg.get("pose") or {}
     return {
         "pose_swap_xy": bool(pose.get("pose_swap_xy", False)),
-        "pose_pixel_flip_y": bool(pose.get("pose_pixel_flip_y", False)),
+        "pose_pixel_flip_y": bool(pose.get("pose_pixel_flip_y", True)),
         "pose_yaw_offset_deg": float(pose.get("pose_yaw_offset_deg", 0.0)),
     }
 
@@ -201,9 +245,21 @@ def map_display_meta_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Pose flags + optional mirrors for map × screen (+UE Y → +screen X uses pose_swap_xy)."""
     pose = cfg.get("pose") or {}
     meta = pose_meta_from_config(cfg)
-    meta["map_mirror_x"] = bool(pose.get("map_mirror_x", False))
-    meta["map_mirror_y"] = bool(pose.get("map_mirror_y", False))
+    meta["map_mirror_x"] = bool(pose.get("map_mirror_x", True))
+    meta["map_mirror_y"] = bool(pose.get("map_mirror_y", True))
     return meta
+
+
+def capture_camera_rotation_add_deg(cfg: dict[str, Any]) -> tuple[float, float, float]:
+    """Pitch, yaw, roll (degrees) added to BOXSIM_SCREENSHOT_CAMERA_ROTATION before vset /camera/.../rotation."""
+    cap = cfg.get("capture") or {}
+    add = cap.get("camera_rotation_add_deg") or [0.0, 0.0, 0.0]
+    if len(add) >= 3:
+        try:
+            return (float(add[0]), float(add[1]), float(add[2]))
+        except (TypeError, ValueError):
+            pass
+    return (0.0, 0.0, 0.0)
 
 
 def apply_origin_world_adjust(cfg: dict[str, Any], cx: float, cy: float) -> tuple[float, float]:

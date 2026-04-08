@@ -13,6 +13,8 @@ import numpy as np
 from map_utils import scales_from_ortho
 from .capture_config import (
     apply_origin_world_adjust,
+    capture_bounds_padding,
+    capture_camera_rotation_add_deg,
     capture_camera_z_from_config,
     capture_ortho_from_config,
     load_boxsim_config,
@@ -59,6 +61,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _screenshot_rotation_string() -> str:
     return os.environ.get("BOXSIM_SCREENSHOT_CAMERA_ROTATION", SCREENSHOT_CAMERA_ROTATION).strip()
+
+
+def _compose_camera_rotation(base_str: str, add_pitch: float, add_yaw: float, add_roll: float) -> str:
+    """UnrealCV vset rotation: pitch yaw roll (deg). Adds deltas to the base triple."""
+    parts = base_str.split()
+    if len(parts) < 3:
+        p, y, r = -90.0, 0.0, 0.0
+    else:
+        try:
+            p, y, r = float(parts[0]), float(parts[1]), float(parts[2])
+        except ValueError:
+            p, y, r = -90.0, 0.0, 0.0
+    return f"{p + add_pitch} {y + add_yaw} {r + add_roll}"
 
 
 def _resolve_capture_camera_position(
@@ -250,7 +265,7 @@ class ScreenshotMapBuilder:
         self.viewer_height = viewer_height
         self.save_path_prefix = save_path_prefix
 
-    def run(self, agent: "UnrealAgent") -> None:
+    def run(self, agent: "UnrealAgent", *, show_agent_icon: bool = True) -> None:
         if not agent.is_connected():
             raise RuntimeError("Agent must be connected")
         saved_path, metadata = self._capture_topdown(agent.client, agent)
@@ -260,9 +275,13 @@ class ScreenshotMapBuilder:
         img = _imread(Path(saved_path))
         if img is None:
             raise RuntimeError(f"Cannot load {saved_path}")
-        def pose_getter():
-            p = agent.get_pawn_pose()
-            return (p.x, p.y, p.yaw) if p else None
+        if show_agent_icon:
+            def pose_getter():
+                p = agent.get_pawn_pose()
+                return (p.x, p.y, p.yaw) if p else None
+        else:
+            def pose_getter():
+                return None
         MapViewer(
             self.viewer_width, self.viewer_height,
             metadata, pose_getter,
@@ -309,6 +328,7 @@ class ScreenshotMapBuilder:
                 capture_ortho_h = ymax - ymin
                 _, _, cz = _resolve_capture_camera_position(agent, float(self.camera_height), debug)
                 debug["capture_world_bounds"] = bounds
+                debug["bounds_padding_applied"] = capture_bounds_padding(self._cfg)
                 if os.environ.get("BOXSIM_CAPTURE_WORLD_BOUNDS", "").strip():
                     debug["capture_xy_source"] = "BOXSIM_CAPTURE_WORLD_BOUNDS env"
                 else:
@@ -326,9 +346,13 @@ class ScreenshotMapBuilder:
 
             cx, cy = apply_origin_world_adjust(self._cfg, cx, cy)
 
-            rot_str = _screenshot_rotation_string()
+            base_rot = _screenshot_rotation_string()
+            ap, ay, ar = capture_camera_rotation_add_deg(self._cfg)
+            rot_str = _compose_camera_rotation(base_rot, ap, ay, ar)
             debug["capture_camera_id"] = cam_id
             debug["camera_world_xyz"] = (cx, cy, cz)
+            debug["camera_rotation_base"] = base_rot
+            debug["camera_rotation_add_deg"] = (ap, ay, ar)
             debug["camera_rotation_cmd"] = rot_str
             # Ortho + width, then location + rotation only (no /pose — not implemented on custom UnrealCV).
             vset("projection_type", f"vset /camera/{cam_id}/projection_type orthographic")
@@ -336,10 +360,16 @@ class ScreenshotMapBuilder:
             vset("location", f"vset /camera/{cam_id}/location {cx} {cy} {cz}")
             vset("rotation", f"vset /camera/{cam_id}/rotation {rot_str}")
             oh_raw = os.environ.get("BOXSIM_ORTHO_HEIGHT", "").strip()
-            try:
-                oh_used = float(oh_raw) if oh_raw else float(capture_ortho_h)
-            except ValueError:
+            if bounds is not None:
+                # In aabb mode, keep Y span tied to provided bounds so grid labels match world coords.
                 oh_used = float(capture_ortho_h)
+                if oh_raw:
+                    debug["ignored_env_ortho_height_in_aabb"] = oh_raw
+            else:
+                try:
+                    oh_used = float(oh_raw) if oh_raw else float(capture_ortho_h)
+                except ValueError:
+                    oh_used = float(capture_ortho_h)
             vset("ortho_height", f"vset /camera/{cam_id}/ortho_height {oh_used}")
 
             cam_err = _verify_camera_responds(client, cam_id, debug)
@@ -385,37 +415,53 @@ class ScreenshotMapBuilder:
                     f"Could not read image; vget returned {saved_to!r}. "
                     f"Files found among candidates: {debug.get('tried_exists', [])}"
                 )
-            if bool(cap_cfg.get("transpose_lit_image", False)):
-                img = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
-                debug["capture_transpose_lit_image"] = True
-            rot_norm = _normalize_lit_rotate_90(cap_cfg.get("lit_rotate_90"))
-            if rot_norm == "cw":
-                img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-            elif rot_norm == "ccw":
-                img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            debug["capture_lit_rotate_90"] = rot_norm
-            lit_flip_h = bool(cap_cfg.get("lit_flip_horizontal", False))
-            lit_flip_v = bool(cap_cfg.get("lit_flip_vertical", False))
-            if lit_flip_h:
-                img = cv2.flip(img, 1)
-            if lit_flip_v:
-                img = cv2.flip(img, 0)
-            debug["capture_lit_flip_horizontal"] = lit_flip_h
-            debug["capture_lit_flip_vertical"] = lit_flip_v
+            apply_lit = bool(cap_cfg.get("apply_lit_image_transforms", False))
+            debug["apply_lit_image_transforms"] = apply_lit
+            transpose_applied = False
+            rot_norm = "none"
+            lit_flip_h = lit_flip_v = False
+            if apply_lit:
+                if bool(cap_cfg.get("transpose_lit_image", False)):
+                    img = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
+                    transpose_applied = True
+                    debug["capture_transpose_lit_image"] = True
+                rot_norm = _normalize_lit_rotate_90(cap_cfg.get("lit_rotate_90"))
+                if rot_norm == "cw":
+                    img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                elif rot_norm == "ccw":
+                    img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                debug["capture_lit_rotate_90"] = rot_norm
+                lit_flip_h = bool(cap_cfg.get("lit_flip_horizontal", False))
+                lit_flip_v = bool(cap_cfg.get("lit_flip_vertical", False))
+                if lit_flip_h:
+                    img = cv2.flip(img, 1)
+                if lit_flip_v:
+                    img = cv2.flip(img, 0)
+                debug["capture_lit_flip_horizontal"] = lit_flip_h
+                debug["capture_lit_flip_vertical"] = lit_flip_v
             native_h, native_w = img.shape[0], img.shape[1]
             cv2.imwrite(str(path), img)
-            lit_pixel_axes_transpose = rot_norm in ("cw", "ccw")
+            rot_swap = rot_norm in ("cw", "ccw")
+            lit_pixel_axes_transpose = transpose_applied ^ rot_swap if apply_lit else False
             if lit_pixel_axes_transpose:
                 meta_ortho_w = float(oh_used)
                 meta_ortho_h = float(capture_ortho_w)
             else:
                 meta_ortho_w = float(capture_ortho_w)
                 meta_ortho_h = float(oh_used)
+            # Unreal builds can ignore ortho_height and derive height from ortho_width and render aspect.
+            # Keep map/world coordinates aligned to pixels by using the effective visible Y span.
+            if native_w > 0 and bounds is not None:
+                effective_h = float(meta_ortho_w) * (float(native_h) / float(native_w))
+                if effective_h > 0:
+                    if abs(effective_h - float(meta_ortho_h)) > 1e-6:
+                        debug["effective_ortho_height_from_aspect"] = effective_h
+                    meta_ortho_h = effective_h
             sx, sy = scales_from_ortho(meta_ortho_w, meta_ortho_h, native_w, native_h)
             disp = map_display_meta_from_config(self._cfg)
-            if lit_flip_h:
+            if apply_lit and lit_flip_h:
                 disp["map_mirror_x"] = True
-            if lit_flip_v:
+            if apply_lit and lit_flip_v:
                 disp["map_mirror_y"] = True
             meta = {
                 "origin": [float(cx), float(cy)],
@@ -426,21 +472,42 @@ class ScreenshotMapBuilder:
                 "ortho_height": meta_ortho_h,
                 "capture_native_width": int(native_w),
                 "capture_native_height": int(native_h),
-                "capture_transpose_lit_image": bool(cap_cfg.get("transpose_lit_image", False)),
+                "apply_lit_image_transforms": apply_lit,
+                "capture_transpose_lit_image": transpose_applied,
                 "capture_swap_ortho_width_height": bool(cap_cfg.get("swap_ortho_width_height", False)),
                 "lit_rotate_90": rot_norm,
                 "lit_flip_horizontal": lit_flip_h,
                 "lit_flip_vertical": lit_flip_v,
                 "lit_pixel_axes_transpose": lit_pixel_axes_transpose,
+                "screenshot_fit_contain": True,
                 **disp,
             }
             if bounds is not None:
-                meta["capture_world_bounds"] = [bounds[0], bounds[1], bounds[2], bounds[3]]
-                meta["world_bounds"] = meta["capture_world_bounds"]
-                meta["capture_bounds_center"] = [
-                    float((bounds[0] + bounds[1]) / 2.0),
-                    float((bounds[2] + bounds[3]) / 2.0),
+                # Bounds used for camera placement / target rectangle requested by user.
+                req_bounds = [bounds[0], bounds[1], bounds[2], bounds[3]]
+                # Effective on-screen bounds for grid/coords must match visible ortho span.
+                eff_bounds = [
+                    float(cx - meta_ortho_w / 2.0),
+                    float(cx + meta_ortho_w / 2.0),
+                    float(cy - meta_ortho_h / 2.0),
+                    float(cy + meta_ortho_h / 2.0),
                 ]
+                meta["capture_requested_world_bounds"] = req_bounds
+                meta["capture_world_bounds"] = eff_bounds
+                meta["world_bounds"] = eff_bounds
+                meta["capture_bounds_center"] = [
+                    float(cx),
+                    float(cy),
+                ]
+                xmin, xmax, ymin, ymax = bounds[0], bounds[1], bounds[2], bounds[3]
+                pad_note = debug.get("bounds_padding_applied", 0.0)
+                print(
+                    "[BoxSim] Capture region (UE world XY; bounds include padding on each side):\n"
+                    f"  xmin={xmin}  xmax={xmax}  ymin={ymin}  ymax={ymax}\n"
+                    f"  center=({cx:.2f}, {cy:.2f})  ortho_width={capture_ortho_w}  ortho_height={capture_ortho_h}\n"
+                    f"  bounds_padding={pad_note} (world units expanded outward on each side from config bounds)\n"
+                    "  Place a level box (XY) covering this rectangle so its corners align with these extents."
+                )
             if _debug_screenshot():
                 print("[BOXSIM_DEBUG_SCREENSHOT] ok, loaded from", used, "wrote", path)
             return (str(path), meta)
