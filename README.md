@@ -1,77 +1,194 @@
 # BoxSim
 
-Unreal Engine 5 + UnrealCV: pose, drive, map building.
+BoxSim connects **Python** to **Unreal Engine 5** through **UnrealCV**. You use it to define a driving path on a track, record labeled camera frames along that path, train a small **left / right / forward** image classifier, and run that model back in the sim.
+
+The sibling repo **`UE5PathTapePrototype`** is an Unreal plugin: it loads path JSON in the editor, draws a spline (optional tape/background), and **exports the path in true UE world coordinates**. BoxSim and Path Tape share the same JSON shape (`path`, `path_points`, or `world_points`).
+
+---
+
+## What this repo does
+
+| Area | What | Entry point |
+|------|------|-------------|
+| **Connect to UE** | Pose polling, object list, debug UnrealCV | `main.py`, `agent.py` |
+| **Drive manually** | Send W/A/S/D sequences to the pawn | `drive.py` |
+| **Build maps** | Top-down capture or draw obstacles + **path**; save PNG + JSON | `build.py` |
+| **World path** | Confirm path in-level; export UE cm coordinates | **UE5 Path Tape** (`PathManagerActor`) |
+| **Collect data** | Teleport pawn along path; save images + `manifest.jsonl` | `data_collection/collect.py` |
+| **Train** | Fine-tune ResNet on collected frames | `training.py` |
+| **Eval** | Closed-loop driving + metrics on a map | `eval.py` |
+
+**Typical end-to-end work:** map/trace path → Path Tape world export → collect → train → eval.
+
+**Data layout (after you run things):**
+
+```
+data/maps/          # map.png + .json + *_w.json (world path)
+data/datasets/      # collection runs (manifest + images/)
+models/             # trained classifier (.pkl)
+data/evals/         # eval logs and step images
+config/boxsim.json  # capture alignment (gitignored; copy from example)
+```
+
+---
+
+## Set up
+
+1. **Python 3.10+** and dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Unreal project** with UnrealCV listening on **`localhost:9000`**. Start the editor or packaged game before any BoxSim command that talks to UE.
+
+3. **UE5 Path Tape** — Copy `Plugins/UE5PathTapePrototype/` from the sibling repo into your project’s `Plugins/`, enable **UE5 Path Tape** in the editor, rebuild. See that repo’s README for actor details.
+
+4. **Pawn name** (required for drive, collection, eval):
+   ```bash
+   python main.py --list-objects
+   export UNREALCV_PAWN="<object_name>"    # not the display name
+   ```
+
+5. **Screenshot maps only** — Align the top-down capture with your level:
+   ```bash
+   cp config/boxsim.example.json config/boxsim.json
+   ```
+   Adjust if the lit image and live robot overlay don’t match. Details: [`builder/capture_config.py`](builder/capture_config.py).
+
+---
+
+## How to Run
+
+Unreal must be running for every step below except dry-run collection and `build.py frompng`.
+
+### End-to-end pipeline (recommended first read)
+
+```
+1. Trace path in BoxSim          →  map_w.json (approx world XY)
+2. Load JSON in Path Tape (UE)   →  spline visible on track
+3. Export world points (UE)      →  path_world_points.json (ground truth)
+4. collect.py                    →  data/datasets/<run>/
+5. training.py                   →  models/turn_classifier.pkl
+6. eval.py                       →  data/evals/<run>/
+```
+
+---
+
+### A. Build a map (path + optional obstacles)
+
+Open the pygame map editor, draw geometry, save with **Ctrl+S**.
+
+| Mode | Command | Output | Notes |
+|------|---------|--------|--------|
+| **Screenshot** | `python build.py screenshot` | `data/maps/map.png`, `map.json`, **`map_w.json`** | Grabs ortho lit image from UE; best when `config/boxsim.json` matches your level |
+| **Manual grid** | `python build.py manual` | `data/maps/manual_map*` | Blank grid from config bounds |
+| **Manual + robot** | `python build.py manual --unreal` | same | Live pose overlay while tracing |
+| **Floor plan PNG** | `python build.py frompng 1.png --width-in 144 --length-in 96` | `outline_trace.json` (inches) | No `*_w.json`; use Path Tape + export, or `scripts/normalize_map_json.py` |
+
+**Editor basics:** `E` = path tool (click waypoints in order; close on first point or right-click) · `1`/`2`/`3` = poly / brush / box · `A`/`S`/`D` = obstacle / drivable / cut · `W` = goal · **Ctrl+S** save · **Ctrl+Z** undo.
+
+For **data collection**, you need a JSON whose polyline is in **UE world cm**. Easiest source: the **`*_w.json`** file from screenshot/manual save. Collection only needs the path polyline, not obstacles.
+
+---
+
+### B. Path Tape — world coordinates in UE
+
+Use this when the path must match the **actual level** (or you started from plan/inch JSON).
+
+1. In UE, place **`PathManagerActor`**.
+2. Set **Json File Path** to your BoxSim file (e.g. `data/maps/map_w.json` or `map.json`).
+3. **Rebuild From Json** — spline (and optional tape) appear in the level.
+4. If scale/position is wrong: set **`"path_space": "world"`** in JSON, or use the actor’s **World XY** override (coordinates already in UE cm).
+5. **Export World Points To Json** — writes e.g. `Saved/PathExports/path_world_points.json` with **`world_points`** in world space.
+
+That export is what you pass to **`collect.py --map`**. You can also merge plan + world export for outline tracks: `python scripts/normalize_map_json.py 4` → `outline_trace4_w.json`.
+
+BoxSim collection accepts either **`"path"`** or **`"world_points"`** (Path Tape export format).
+
+---
+
+### C. Collect training data
+
+Moves the pawn along the path in steps, labels each frame **forward / left / right**, optionally saves lit PNGs from the pawn camera.
+
+**Dry run** (validates path, no UE):
 
 ```bash
-pip install -r requirements.txt
+python data_collection/collect.py \
+  --dry-run \
+  --map data/maps/map_w.json \
+  --run-name run1
 ```
 
-**Capture config (framing and pose)**  
-When `config/boxsim.json` is missing, [config/boxsim.example.json](config/boxsim.example.json) is used. It frames a fixed UE **AABB** from corners **(-720, -350)**, **(-720, 750)**, **(210, 750)**, **(210, -350)** — i.e. **[xmin, xmax, ymin, ymax] = [-720, 210, -350, 750]**, world size **930 × 1100**, center **(-255, 200)**. Copy to `config/boxsim.json` (gitignored) or set `BOXSIM_CONFIG` to change it. Use **`capture.mode": "pawn_xy"`** if you want the view centered on the pawn with ortho from `ortho_width` / `ortho_height` instead.
+**Live collection** (UE running, pawn on drivable surface):
 
-- **`capture.mode`**: `pawn_xy` centers the ortho camera on the pawn (same XY) and uses `ortho_width` / `ortho_height` for how much world fits in the shot. `aabb` uses `capture.bounds` as `[xmin, xmax, ymin, ymax]` in UE world XY: camera looks at the box center and ortho spans match that rectangle.
-- **`capture.camera_z_offset`**: height of the virtual lit camera above the pawn Z. For an **orthographic** top-down shot this does **not** change zoom; it only shifts along the view axis. **Zoom / field of view** is **`ortho_width` and `ortho_height`** (and UE/sensor aspect).
-- **`capture.lit_rotate_90`**: **`none`**, **`cw`**, or **`ccw`** — rotates the **saved lit PNG** 90° after optional `transpose_lit_image`. Sets **`lit_pixel_axes_transpose`** in `map.json` so world↔grid math matches the bitmap (same effect as **`pose_swap_xy`** for alignment, without toggling pose by hand). **`ortho_width` / `ortho_height`** in metadata are swapped when rotating so scales stay correct.
-- **`capture.lit_flip_horizontal` / `lit_flip_vertical`**: flip the lit image before save; **`map_mirror_x` / `map_mirror_y`** in metadata are forced **on** for the matching axis so pygame drawing stays consistent (e.g. **+UE X ↔ −map X** via horizontal flip + mirror).
-- **`pose`**: Written into map metadata for the robot overlay:
-  - **`pose_swap_xy`**: when **true**, pawn **UE Y** drives **horizontal** map-pixel motion and UE **X** vertical — usually leave **false** if you use **`lit_rotate_90`** (metadata then carries **`lit_pixel_axes_transpose`**). You can still enable this for manual maps or legacy PNGs without re-capture.
-  - **`pose_yaw_offset_deg`**: adds to Unreal yaw before drawing the triangle (try **90** or **-90** if forward points wrong after rotation).
-  - **`map_mirror_x` / `map_mirror_y`**: flip map ↔ screen; can be combined with capture flips (capture flips merge via OR into the saved metadata).
-  - **`pose_pixel_flip_y`**: vertical flip in map-pixel space (screenshot vs manual).
-
-Env overrides (when set) win over the file: `BOXSIM_CAPTURE_WORLD_BOUNDS`, `BOXSIM_CAPTURE_USE_PAWN_XY`, `BOXSIM_ORTHO_WIDTH`, `BOXSIM_ORTHO_HEIGHT`, `BOXSIM_CAMERA_Z_OFFSET`, `BOXSIM_POSE_*`, etc. See [builder/capture_config.py](builder/capture_config.py).
-
-**Agent / grid vs background drift** — Prefer fixing the **bitmap** with **`capture.lit_rotate_90`** (`cw` / `ccw`) and **`lit_flip_horizontal` / `lit_flip_vertical`** so **+UE Y** matches vertical on screen and axes match your mental model; then set **`pose_swap_xy": false`** and recapture. If the **photo** still does not line up, try in order: **`capture.swap_ortho_width_height`** (`BOXSIM_SWAP_ORTHO_WIDTH_HEIGHT=1`); **`capture.transpose_lit_image`** (`BOXSIM_TRANSPOSE_LIT_IMAGE=1`); **`pose_swap_xy`**; **`capture.origin_world_adjust": [dx, dy]`** (`BOXSIM_ORIGIN_WORLD_ADJUST=dx,dy`). **Recapture** after changing lit processing so `map.json` matches the PNG.
-
-Fixed world rectangle (four UE corners as min/max), in `config/boxsim.json`:
-
-```json
-{
-  "capture": {
-    "mode": "aabb",
-    "bounds": [-720, 210, -350, 750],
-    "ortho_width": 2000,
-    "ortho_height": 2000,
-    "lit_rotate_90": "cw",
-    "lit_flip_horizontal": true
-  },
-  "pose": {
-    "pose_swap_xy": false,
-    "pose_pixel_flip_y": false,
-    "pose_yaw_offset_deg": 0
-  }
-}
+```bash
+python data_collection/collect.py \
+  --map Saved/PathExports/path_world_points.json \
+  --run-name run1 \
+  --step 25 \
+  --lookahead 75
 ```
 
-With `aabb`, `ortho_width`/`ortho_height` in the file are ignored for the Unreal `vset` (spans come from `bounds`); they still inform defaults if you switch back to `pawn_xy`.
+**Output:** `data/datasets/run1/manifest.jsonl`, `run_config.json`, `images/frame_*.png`.
 
-**World coordinates on the map**  
-After a screenshot capture, `map.json` stores `origin` (world XY at the **center** of the image), `scale_x` / `scale_y` (native pixels per world unit along image X and Y), and optional `capture_world_bounds` / `world_bounds`. Native-lit offsets use `world_to_pixel` in [map_utils.py](map_utils.py); the viewer scales from native resolution to the pygame window. Older maps with only `scale` still load (`scale_y` defaults to `scale`).
+| Flag | Role |
+|------|------|
+| `--map` | JSON with world-space path (default `data/maps/map_w.json`) |
+| `--run-name` | Folder under `data/datasets/` |
+| `--step` | cm between frames along the path (smaller → more data) |
+| `--lookahead` | cm ahead for heading and turn labels |
+| `--no-capture` | Teleport + manifest only (no images) |
+| `--curve polyline` | Chord path; default is smooth `catmull_rom` |
 
-If a **top-down shot** shows landmarks hundreds of world units away from grid labels (e.g. UE `(-50,-90)` appears at tick `(-550,560)`), check **`origin`**: it must be the capture center **(~(-255, 200)** for the default AABB), not **`[0,0]`** from an old manual map. The viewer now **re-syncs** `capture_native_*` and `scale_*` from the actual PNG shape, and resets **`origin`** from `capture_bounds_center` / bounds when `origin` is zero or **> 25% of the span** away from that center. **Save** (Ctrl+S) to persist the fixed `origin` in `map.json`.
+If the pawn doesn’t move: check `UNREALCV_PAWN`. If it falls: `--pawn-z`. If heading is wrong: `--yaw-offset` or tune `--lookahead` / `--step`.
 
-**Features**
-- **Pose** — Poll pawn location (X, Y) and yaw at 5 Hz from Unreal.
-- **Drive** — Run a sequence of W/A/S/D key presses (declare in `drive.py` PATH); keys sent to Unreal via UnrealCV.
-- **Map from screenshot** — Capture top-down ortho from Unreal, draw obstacles (polygon/brush/box), save map.png + map.json.
-- **Map from scratch** — Same drawing tools on a blank grid; optional live pose overlay.
-- **Object list / debug** — `--list-objects` to see pawn object name; `--debug` to see raw UnrealCV commands and responses.
+Full CLI: [`data_collection/README.md`](data_collection/README.md).
 
-| Command | What |
-|---------|------|
-| `python main.py` | Pose at 5 Hz. Ctrl+C stop. |
-| `python main.py --list-objects` | List object names (use as `UNREALCV_PAWN`) |
-| `python main.py --debug` | Raw UnrealCV responses |
-| `python drive.py` | Run PATH in drive.py (W/A/S/D sent to Unreal) |
-| `python build.py screenshot` | Top-down from Unreal, annotate, save |
-| `python build.py manual` | Blank canvas, draw obstacles |
-| `python build.py manual --unreal` | Same + connect to Unreal (robot overlay) |
+---
 
+### D. Train the policy
 
-Env: `UNREALCV_PAWN` if your pawn object name differs (use object name, not display name).
+```bash
+python training.py --data-root data/datasets --run-glob "run1"
+```
 
-For screenshot capture with FusionCamSensor (custom UnrealCV), lit uses a **non-zero** camera id — set `BOXSIM_UNREALCV_CAMERA_ID=1` if needed, or rely on `vget /cameras` (camera `0` is the pawn, not the lit sensor).
+Default: ResNet18, classes `left,right,forward`, writes e.g. `models/turn_classifier.pkl`. Use `--run-glob "run*"` to combine multiple collection runs.
 
-Robot overlay: map coords use **native lit** pixels (`scale_x` / `scale_y` from ortho spans and bitmap size); `_map_pixel_to_screen` multiplies by `window / capture_native` so polys, grid, and robot stay aligned when the screenshot is stretched. With **`pose_swap_xy`** or **`lit_pixel_axes_transpose`** (from **`lit_rotate_90`**), heading uses `π/2 − yaw` so UE forward matches the swapped axes (tune with **`pose_yaw_offset_deg`** if still off).
+---
 
-Map controls: Tools and terrain on the left sidebar (1/2/3=Poly/Brush/Box, A/S/D=obstacle/drivable/cut, W=goal E=path). Click first path point again or right-click to close. Ctrl+S=Save, Ctrl+Z=Undo. Grid extent comes from `world_bounds` / `capture_world_bounds` or from `ortho_*` and `origin` in JSON; cut restores to grid (or background image). Save stores geometry in map.json (obstacles, drivable, erase_polygons) for rebuild.
+### E. Evaluate in the sim
+
+Runs the trained model closed-loop on the same map path, logs centerline error and saves step images.
+
+```bash
+python eval.py \
+  --model models/turn_classifier.pkl \
+  --map data/maps/map_w.json \
+  --finish-mode lap
+```
+
+For **closed loops**, prefer **`--finish-mode lap`** (not plain distance). Outputs under `data/evals/<run-name>/`.
+
+---
+
+### F. Other Unreal tools
+
+| Task | Command |
+|------|---------|
+| Stream pose at 5 Hz | `python main.py` |
+| List UnrealCV objects | `python main.py --list-objects` |
+| Debug UnrealCV traffic | `python main.py --debug` |
+| Run keyboard path in `drive.py` | Edit `PATH` in `drive.py`, then `python drive.py` |
+
+---
+
+## Info
+
+**Two repos, one pipeline** — BoxSim traces and stores maps/paths; Path Tape places the path in UE and exports authoritative world XY. Collection and eval consume that world JSON.
+
+**Config** — `config/boxsim.json` controls screenshot bounds, ortho size, lit rotation/flips, and pose overlay. Env vars override the file (`BOXSIM_*`); see `builder/capture_config.py`.
+
+**Deeper docs** — Collection: [`data_collection/README.md`](data_collection/README.md). Path Tape plugin: **UE5PathTapePrototype** README.
+
+**Helper scripts** (optional) — `scripts/normalize_map_json.py` (merge outline + world export), `scripts/densify_map_path.py`, `scripts/emit_path_snippet.py`, test runners under `scripts/*.ps1`.

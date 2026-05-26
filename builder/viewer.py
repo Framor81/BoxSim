@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
+from pathlib import Path
 from typing import Callable
 
 import pygame
@@ -53,6 +55,8 @@ GOAL_RADIUS = 10
 COORD_TICK_INTERVAL = 200
 GRID_LABEL_PAD_X = 6
 GRID_LABEL_PAD_Y = 6
+# Inch-trace mode: grid step is chosen from area size in _inch_grid_step.
+INCH_GRID_STEP_MIN = 1.0
 # When map.json has no world_bounds / capture_world_bounds / ortho, grid ticks use this symmetric range.
 GRID_EXTENT_FALLBACK = (-1000.0, 1000.0, -1000.0, 1000.0)
 SIDEBAR_WIDTH = 92
@@ -217,10 +221,14 @@ class MapViewer:
         background_image: np.ndarray | None = None,
         world_width: float | None = None,
         world_height: float | None = None,
+        trace_area_inches: tuple[float, float] | None = None,
     ) -> None:
         """Set up window, load obstacles/drivable from metadata, apply saved erase_polygons as cuts."""
         self.width, self.height = width, height
         self.metadata = dict(metadata)
+        self._inch_mode = trace_area_inches is not None
+        self._trace_w_in = float(trace_area_inches[0]) if trace_area_inches else 0.0
+        self._trace_l_in = float(trace_area_inches[1]) if trace_area_inches else 0.0
         self.pose_getter = pose_getter
         self.world_width = world_width or self.metadata.get("ortho_width", 4000)
         self.world_height = world_height or self.metadata.get("world_height") or self.world_width
@@ -268,7 +276,8 @@ class MapViewer:
         self._capture_native_h = int(self.metadata.get("capture_native_height") or 0)
         if background_image is not None:
             self._sync_capture_native_and_scales_from_image(background_image)
-            self._reconcile_screenshot_origin()
+            if not self._inch_mode:
+                self._reconcile_screenshot_origin()
 
         pygame.init()
         self._font = pygame.font.Font(None, 24)
@@ -286,7 +295,10 @@ class MapViewer:
             self.view_center = (width // 2, height // 2)
 
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
-        cap = "Map Builder (screenshot preview)" if self._screenshot_fit_contain else "Map Builder"
+        if self._inch_mode:
+            cap = "Map Builder (outline trace, inches)"
+        else:
+            cap = "Map Builder (screenshot preview)" if self._screenshot_fit_contain else "Map Builder"
         pygame.display.set_caption(cap)
         self.clock = pygame.time.Clock()
         has_bg = self.background is not None
@@ -337,6 +349,10 @@ class MapViewer:
             return
         if self._capture_native_w != aw or self._capture_native_h != ah:
             self._capture_native_w, self._capture_native_h = aw, ah
+        if self._inch_mode:
+            # Stored geometry is in inches; ortho/world scale is unused.
+            self.scale_x = self.scale_y = self.scale = 1.0
+            return
         ow = float(self.metadata.get("ortho_width", 0) or 0)
         oh = float(self.metadata.get("ortho_height", 0) or 0)
         if ow > 0 and oh > 0:
@@ -397,8 +413,116 @@ class MapViewer:
             scale_y=self.scale_y,
         )
 
+    def _map_pixel_to_world(self, mx: float, my: float) -> tuple[float, float]:
+        """Inverse of _world_to_map_pixel for persisted map-space points -> UE/world XY."""
+        wx, wy = map_utils.pixel_to_world(
+            mx,
+            my,
+            self.origin[0],
+            self.origin[1],
+            self.scale_x,
+            flip_y=self._pose_pixel_flip_y,
+            scale_y=self.scale_y,
+        )
+        if self._swap_world_xy_for_map:
+            wx, wy = wy, wx
+        return (wx, wy)
+
+    def _trace_bg_rect(self) -> tuple[float, float, float, float]:
+        """Letterboxed image rect in screen px: bg_x, bg_y, dw, dh. Fallback full window if no bg."""
+        if self.background is None:
+            return (0.0, 0.0, float(self.width), float(self.height))
+        return (
+            float(self._bg_draw_x),
+            float(self._bg_draw_y),
+            float(self.background.get_width()),
+            float(self.background.get_height()),
+        )
+
+    def _inch_grid_step(self) -> float:
+        span = max(self._trace_w_in, self._trace_l_in, 1e-6)
+        step = 6.0
+        if span > 120.0:
+            step = 12.0
+        if span > 300.0:
+            step = 24.0
+        if span > 600.0:
+            step = 48.0
+        return max(INCH_GRID_STEP_MIN, step)
+
+    def _screen_to_trace_inches(self, sx: float, sy: float) -> tuple[float, float]:
+        bg_x, bg_y, dw, dh = self._trace_bg_rect()
+        if dw <= 1e-6 or dh <= 1e-6 or self._trace_w_in <= 0 or self._trace_l_in <= 0:
+            return (0.0, 0.0)
+        u = (sx - bg_x) / dw
+        v_top = (sy - bg_y) / dh
+        u = min(1.0, max(0.0, u))
+        v_top = min(1.0, max(0.0, v_top))
+        ix = u * self._trace_w_in
+        iy = (1.0 - v_top) * self._trace_l_in
+        return (ix, iy)
+
+    def _trace_inches_to_screen(self, ix: float, iy: float) -> tuple[float, float]:
+        bg_x, bg_y, dw, dh = self._trace_bg_rect()
+        if dw <= 1e-6 or dh <= 1e-6 or self._trace_w_in <= 0 or self._trace_l_in <= 0:
+            return (bg_x, bg_y)
+        u = ix / self._trace_w_in
+        v_top = 1.0 - iy / self._trace_l_in
+        sx = bg_x + u * dw
+        sy = bg_y + v_top * dh
+        return (sx, sy)
+
+    def _draw_inch_coord_grid(self, surface: pygame.Surface, *, overlay: bool) -> None:
+        """Grid in plan inches: x along image width (0 = left), y along image height (0 = bottom)."""
+        vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
+        step = self._inch_grid_step()
+        pad_x = GRID_OVERLAY_LABEL_PAD_X if overlay else GRID_LABEL_PAD_X
+        pad_y = GRID_OVERLAY_LABEL_PAD_Y if overlay else GRID_LABEL_PAD_Y
+        if overlay:
+            c_grid = (*COLOR_GRID, GRID_OVERLAY_GRID_ALPHA)
+            c_axis = (*COLOR_AXIS, GRID_OVERLAY_AXIS_ALPHA)
+            c_label = GRID_OVERLAY_LABEL
+        else:
+            c_grid, c_axis, c_label = COLOR_GRID, COLOR_AXIS, COLOR_AXIS
+        gx0, gx1 = 0.0, self._trace_w_in
+        gy0, gy1 = 0.0, self._trace_l_in
+        axis_x_px = None
+        axis_y_px = None
+        if gx0 <= 0.0 <= gx1:
+            axis_x_px, _ = self._trace_inches_to_screen(0.0, 0.0)
+        if gy0 <= 0.0 <= gy1:
+            _, axis_y_px = self._trace_inches_to_screen(0.0, 0.0)
+        x_label_y = int(axis_y_px + pad_y) if axis_y_px is not None else int(vc[1] + pad_y)
+        y_label_x = int(axis_x_px + pad_x) if axis_x_px is not None else int(vc[0] + pad_x)
+        wx = math.ceil(gx0 / step) * step
+        while wx <= gx1:
+            px, _ = self._trace_inches_to_screen(wx, 0.0)
+            if -20 <= px < self.width + 20:
+                is_axis = abs(wx) < 1e-9
+                col = c_axis if is_axis else c_grid
+                w = 2 if is_axis else 1
+                pygame.draw.line(surface, col, (int(px), 0), (int(px), self.height), w)
+                lab = str(int(wx)) if abs(wx - round(wx)) < 1e-6 else str(round(wx, 2))
+                t = self._font.render(f"{lab} in", True, c_label)
+                surface.blit(t, (int(px) + pad_x, x_label_y))
+            wx += step
+        wy = math.ceil(gy0 / step) * step
+        while wy <= gy1:
+            _, py = self._trace_inches_to_screen(0.0, wy)
+            if -20 <= py < self.height + 20:
+                is_axis = abs(wy) < 1e-9
+                col = c_axis if is_axis else c_grid
+                w = 2 if is_axis else 1
+                pygame.draw.line(surface, col, (0, int(py)), (self.width, int(py)), w)
+                lab = str(int(wy)) if abs(wy - round(wy)) < 1e-6 else str(round(wy, 2))
+                t = self._font.render(f"{lab} in", True, c_label)
+                surface.blit(t, (y_label_x, int(py) - t.get_height() // 2))
+            wy += step
+
     def _grid_world_extent(self) -> tuple[float, float, float, float]:
         """xmin,xmax,ymin,ymax in world units for axis ticks."""
+        if self._inch_mode:
+            return (0.0, self._trace_w_in, 0.0, self._trace_l_in)
         raw = self.metadata.get("capture_world_bounds") or self.metadata.get("world_bounds")
         if raw is not None and len(raw) == 4:
             try:
@@ -423,6 +547,9 @@ class MapViewer:
 
     def _draw_world_coord_grid(self, surface: pygame.Surface, *, overlay: bool) -> None:
         """World-space grid; origin + scale match metadata (image center = origin in UE). overlay: semi-transparent."""
+        if self._inch_mode:
+            self._draw_inch_coord_grid(surface, overlay=overlay)
+            return
         vc = (self.view_center[0] + self.view_offset_x, self.view_center[1] + self.view_offset_y)
         ox, oy = self.origin[0], self.origin[1]
         step = COORD_TICK_INTERVAL
@@ -498,6 +625,8 @@ class MapViewer:
 
     def _map_window_scale_k(self) -> tuple[float, float]:
         """Map coords are in native-lit space (world * scale); scale to pygame when screenshot is stretched to window."""
+        if self._inch_mode:
+            return (1.0, 1.0)
         if (
             self.background is not None
             and self._capture_native_w > 0
@@ -510,6 +639,8 @@ class MapViewer:
 
     def _screen_to_map_pixel(self, sx: float, sy: float) -> tuple[float, float]:
         """Screen (pixel) to map coords: origin at view_center + offset, Y flipped."""
+        if self._inch_mode:
+            return self._screen_to_trace_inches(sx, sy)
         kx, ky = self._map_window_scale_k()
         mx = (sx - self.view_center[0] - self.view_offset_x) / kx
         my = -(sy - self.view_center[1] - self.view_offset_y) / ky
@@ -521,6 +652,8 @@ class MapViewer:
 
     def _map_pixel_to_screen(self, mx: float, my: float) -> tuple[float, float]:
         """Map coords to screen (pixel). Inverse of _screen_to_map_pixel."""
+        if self._inch_mode:
+            return self._trace_inches_to_screen(mx, my)
         if self._map_mirror_x:
             mx = -mx
         if self._map_mirror_y:
@@ -682,7 +815,12 @@ class MapViewer:
         elif self.terrain == TERRAIN_CUT:
             mx, my = self._screen_to_map_pixel(pos[0], pos[1])
             try:
-                circle = Point(mx, my).buffer(BRUSH_RADIUS)
+                if self._inch_mode:
+                    _, _, dw, dh = self._trace_bg_rect()
+                    r_in = BRUSH_RADIUS * (self._trace_w_in / max(dw, 1.0))
+                    circle = Point(mx, my).buffer(r_in)
+                else:
+                    circle = Point(mx, my).buffer(BRUSH_RADIUS)
                 if not circle.is_empty:
                     self._subtract_cut_from_terrain(circle)
             except Exception:
@@ -861,7 +999,7 @@ class MapViewer:
             self._pose_cache = self.pose_getter()
             self._pose_cache_time = now
         pose = self._pose_cache
-        if pose is not None:
+        if pose is not None and not self._inch_mode:
             x, y, yaw = pose
             px_off, py_off = self._world_to_map_pixel(x, y)
             sx, sy = self._map_pixel_to_screen(px_off, py_off)
@@ -915,7 +1053,29 @@ class MapViewer:
         drawn_mask = (drawn[:, :, 0] > 0) | (drawn[:, :, 1] > 0) | (drawn[:, :, 2] > 0)
         for c in range(3):
             base[:, :, c] = np.where(drawn_mask, drawn[:, :, c], base[:, :, c])
+        # Committed goals + path (same as on-screen, excluding in-progress current_path).
+        ov = pygame.Surface((self.width, self.height))
+        ov.fill((0, 0, 0))
+        ov.set_colorkey((0, 0, 0))
+        self._draw_goals_and_committed_path(ov)
+        ol = np.transpose(pygame.surfarray.array3d(ov), (1, 0, 2))
+        ov_mask = (ol[:, :, 0] > 0) | (ol[:, :, 1] > 0) | (ol[:, :, 2] > 0)
+        for c in range(3):
+            base[:, :, c] = np.where(ov_mask, ol[:, :, c], base[:, :, c])
         return base
+
+    def _draw_goals_and_committed_path(self, surface: pygame.Surface) -> None:
+        """Draw committed goals + path in screen coords (for map.png export)."""
+        for g in self.goals:
+            sx, sy = self._map_pixel_to_screen(g[0], g[1])
+            pygame.draw.circle(surface, COLOR_GOAL, (int(sx), int(sy)), GOAL_RADIUS)
+            pygame.draw.circle(surface, (60, 180, 60), (int(sx), int(sy)), GOAL_RADIUS, 2)
+        if len(self.path) >= 2:
+            pts = [self._map_pixel_to_screen(p[0], p[1]) for p in self.path]
+            pygame.draw.lines(surface, COLOR_PATH, False, pts, 3)
+        for p in self.path:
+            sx, sy = self._map_pixel_to_screen(p[0], p[1])
+            pygame.draw.circle(surface, COLOR_PATH, (int(sx), int(sy)), 5)
 
     def _save(self, path_prefix: str) -> None:
         """Write map image (composed) and JSON (obstacles, drivable with exteriors/interiors, goals, path). erase_polygons not persisted (cuts are baked into terrain)."""
@@ -935,6 +1095,14 @@ class MapViewer:
         if self._capture_native_w > 0 and self._capture_native_h > 0:
             meta["capture_native_width"] = self._capture_native_w
             meta["capture_native_height"] = self._capture_native_h
+        if self._inch_mode:
+            meta["coordinate_system"] = "inches_relative"
+            meta["area_width_in"] = float(self._trace_w_in)
+            meta["area_length_in"] = float(self._trace_l_in)
+            meta["inch_axes"] = {
+                "x": "inches along outline image width (0 = left edge)",
+                "y": "inches along outline image height (0 = bottom edge, area_length_in at top)",
+            }
         meta["goals"] = [[float(p[0]), float(p[1])] for p in self.goals]
         meta["path"] = [[float(p[0]), float(p[1])] for p in self.path]
         meta["obstacles"] = [
@@ -948,7 +1116,19 @@ class MapViewer:
         meta["erase_polygons"] = []
         map_utils.save_map(path_prefix, self._compose_map_image(), meta)
         self._save_flash_until = time.time() + 0.6
-        print(f"Saved {path_prefix}.png and {path_prefix}.json")
+        if self._inch_mode:
+            print(f"Saved {path_prefix}.png and {path_prefix}.json (inches relative; no UE world file)")
+            return
+        # Additional world-coordinate export for consumers that need UE/world XY directly.
+        goals_w = [self._map_pixel_to_world(float(p[0]), float(p[1])) for p in self.goals]
+        path_w = [self._map_pixel_to_world(float(p[0]), float(p[1])) for p in self.path]
+        world_meta = dict(meta)
+        world_meta["goals"] = [[float(x), float(y)] for (x, y) in goals_w]
+        world_meta["path"] = [[float(x), float(y)] for (x, y) in path_w]
+        out_world = Path(path_prefix).with_name(Path(path_prefix).name + "_w").with_suffix(".json")
+        with open(out_world, "w", encoding="utf-8") as f:
+            json.dump(world_meta, f, indent=2)
+        print(f"Saved {path_prefix}.png, {path_prefix}.json, and {out_world}")
 
     def run(self, save_path_prefix: str | None = None) -> None:
         """Main loop: events (click for goal/path/polygon/rect/brush, close polygon on repeat click or RMB, Ctrl+S save, Ctrl+Z undo, Esc cancel or quit), then _render."""

@@ -3,3 +3,7 @@ pygame
 numpy
 opencv-python
 shapely
+ipython
+torch 
+torchvision 
+fastai

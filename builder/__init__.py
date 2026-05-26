@@ -1,4 +1,4 @@
 from .viewer import MapViewer
-from .builders import ScreenshotMapBuilder, ManualMapBuilder
+from .builders import ManualMapBuilder, OutlinePngMapBuilder, ScreenshotMapBuilder
 
-__all__ = ["MapViewer", "ScreenshotMapBuilder", "ManualMapBuilder"]
+__all__ = ["MapViewer", "ManualMapBuilder", "OutlinePngMapBuilder", "ScreenshotMapBuilder"]

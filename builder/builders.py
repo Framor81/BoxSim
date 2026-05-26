@@ -516,6 +516,86 @@ class ScreenshotMapBuilder:
             return fail(f"Exception during capture: {e}")
 
 
+# Default folder for floor-plan / outline images (repo root / outlines).
+OUTLINES_DIRNAME = "outlines"
+
+
+class OutlinePngMapBuilder:
+    """Load an outline PNG, show it as the builder background; save goals/path/terrain in plan inches."""
+
+    def __init__(
+        self,
+        *,
+        outline_name: str,
+        width_inches: float,
+        length_inches: float,
+        viewer_width: int = 1024,
+        viewer_height: int = 768,
+        save_path_prefix: str = "data/maps/outline_trace",
+        outlines_dir: Path | None = None,
+    ) -> None:
+        self.outline_name = outline_name.strip()
+        self.width_inches = float(width_inches)
+        self.length_inches = float(length_inches)
+        self.viewer_width = viewer_width
+        self.viewer_height = viewer_height
+        self.save_path_prefix = save_path_prefix
+        root = Path(__file__).resolve().parent.parent
+        self.outlines_dir = outlines_dir if outlines_dir is not None else (root / OUTLINES_DIRNAME)
+
+    def _resolve_image_path(self) -> Path:
+        raw = Path(self.outline_name)
+        if raw.is_file():
+            return raw.resolve()
+        name = self.outline_name.replace("\\", "/").split("/")[-1]
+        p = (self.outlines_dir / name).resolve()
+        if p.is_file():
+            return p
+        if p.suffix == "":
+            p2 = p.with_suffix(".png")
+            if p2.is_file():
+                return p2
+        raise FileNotFoundError(
+            f"Outline image not found: {self.outline_name!r} (looked under {self.outlines_dir})"
+        )
+
+    def run(self) -> None:
+        if self.width_inches <= 0 or self.length_inches <= 0:
+            raise ValueError("width_inches and length_inches must be positive")
+        path = self._resolve_image_path()
+        img = _imread(path)
+        if img is None:
+            raise IOError(f"Could not read image: {path}")
+        rel = path.name
+        metadata = {
+            "origin": [0.0, 0.0],
+            "scale": 1.0,
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "ortho_width": self.width_inches,
+            "ortho_height": self.length_inches,
+            "map_mirror_x": False,
+            "map_mirror_y": False,
+            "pose_pixel_flip_y": True,
+            "pose_swap_xy": False,
+            "screenshot_fit_contain": True,
+            "outline_source_image": rel,
+            "outline_source_path": str(path).replace("\\", "/"),
+        }
+
+        def pose_getter():
+            return None
+
+        MapViewer(
+            self.viewer_width,
+            self.viewer_height,
+            metadata,
+            pose_getter,
+            background_image=img,
+            trace_area_inches=(self.width_inches, self.length_inches),
+        ).run(self.save_path_prefix)
+
+
 class ManualMapBuilder:
     def __init__(
         self,
